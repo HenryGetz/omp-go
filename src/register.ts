@@ -95,17 +95,15 @@ export function registerOpencodeGo(
         } as SimpleStreamOptions,
       ),
     // `oauth` marks the provider OAuth-native: a credential saved by /login
-    // wins and the apiKey value is only a fallback (ProviderConfig contract).
-    // The host files this registration under the provider name, where pi-catalog's
-    // built-in paste-key login shadows it for dispatch — the real device flow is
-    // registered separately under LOGIN_ID below.
+    // wins and is the only key source — an `apiKey` fallback here would let a
+    // stale OPENCODE_API_KEY in the shell hijack the chat path over the login
+    // (the host validation accepts oauth alone).
     oauth: {
       name: "OpenCode Go (service-account key)",
       login: oauth.login.bind(oauth),
       refreshToken: oauth.refreshToken.bind(oauth),
       getApiKey: oauth.getApiKey.bind(oauth),
     },
-    apiKey: "OPENCODE_API_KEY",
     usage: opencodeGoUsageProvider({ session: sessionIdentity, identity }),
     models: catalogModels(),
     fetchDynamicModels: () => fetchCatalogModels({ session: sessionIdentity, identity }),
