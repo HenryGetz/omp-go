@@ -40,6 +40,16 @@ import {
 export const WIRE_API = "opencode-go-wire"
 const UPSTREAM_API = "openai-completions"
 
+/**
+ * Login id for the Console device flow. Must NOT collide with a built-in
+ * provider id: `authStorage.oauth.login` resolves "built-in registry first,
+ * then runtime-registered extension providers", and pi-catalog's built-in
+ * `opencode-go` login is the paste-a-key flow. `storeCredentialsAs` files the
+ * grant under `opencode-go` so the model provider picks it up.
+ */
+export const LOGIN_ID = "opencode"
+const CREDENTIALS_ID = "opencode-go"
+
 /** Test hooks: point the Console and gateway at a stub without touching code. */
 export const CONSOLE_BASE_ENV = "OMP_GO_CONSOLE"
 export const ZEN_BASE_ENV = "OMP_GO_ZEN"
@@ -84,16 +94,43 @@ export function registerOpencodeGo(
           headers: { ...streamOptions?.headers, ...sessionHeaders(sessionIdentity, identity) },
         } as SimpleStreamOptions,
       ),
+    // `oauth` marks the provider OAuth-native: a credential saved by /login
+    // wins and the apiKey value is only a fallback (ProviderConfig contract).
+    // The host files this registration under the provider name, where pi-catalog's
+    // built-in paste-key login shadows it for dispatch — the real device flow is
+    // registered separately under LOGIN_ID below.
     oauth: {
-      name: oauth.name,
+      name: "OpenCode Go (service-account key)",
       login: oauth.login.bind(oauth),
       refreshToken: oauth.refreshToken.bind(oauth),
       getApiKey: oauth.getApiKey.bind(oauth),
     },
+    apiKey: "OPENCODE_API_KEY",
     usage: opencodeGoUsageProvider({ session: sessionIdentity, identity }),
     models: catalogModels(),
     fetchDynamicModels: () => fetchCatalogModels({ session: sessionIdentity, identity }),
   }
   pi.registerProvider(OPENCODE_GO_PROVIDER, config)
+  // The device-flow login is registered through a second, login-only provider
+  // under LOGIN_ID. Two constraints force this shape:
+  // 1. `authStorage.oauth.login` resolves "built-in registry first, then
+  //    runtime-registered", and pi-catalog's built-in `opencode-go` definition
+  //    owns a paste-a-key login — a registration under that id is shadowed.
+  // 2. The host files `config.oauth` in its own pi-ai registry (the extension's
+  //    direct `registerOAuthProvider` import can land on a different module
+  //    instance than the bundled host, which `/login` reads).
+  // The spread keeps `storeCredentialsAs`, so the grant files under
+  // `opencode-go` and the model provider picks it up.
+  pi.registerProvider(LOGIN_ID, {
+    // The host's registration spreads this object and keeps `storeCredentialsAs`;
+    // the published type predates the field.
+    oauth: {
+      name: oauth.name,
+      storeCredentialsAs: CREDENTIALS_ID,
+      login: oauth.login.bind(oauth),
+      refreshToken: oauth.refreshToken.bind(oauth),
+      getApiKey: oauth.getApiKey.bind(oauth),
+    } as ProviderConfig["oauth"] & { storeCredentialsAs: string },
+  })
   return oauth
 }

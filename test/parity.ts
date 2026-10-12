@@ -201,11 +201,10 @@ async function main(): Promise<number> {
     // registerCustomApi + registerOAuthProvider — so pi-ai's real validation,
     // including "built-in API names are reserved", runs here too. A config that
     // crashes omp startup fails this test instead.
-    const registered: { name?: string; config?: ProviderConfig } = {}
+    const registered = new Map<string, ProviderConfig>()
     const fakePi = {
       registerProvider: (name: string, config: ProviderConfig) => {
-        registered.name = name
-        registered.config = config
+        registered.set(name, config)
         if (config.streamSimple && config.api) {
           const streamSimpleFn = config.streamSimple
           registerCustomApi(config.api, streamSimpleFn, "parity-test", (model, context, options) =>
@@ -217,10 +216,10 @@ async function main(): Promise<number> {
       on: () => undefined,
     } as unknown as ExtensionAPI
     registerOpencodeGo(fakePi)
-    const config = registered.config
+    const config = registered.get("opencode-go")
+    const loginConfig = registered.get("opencode")
     const localProblems: string[] = []
-    if (registered.name !== "opencode-go") localProblems.push(`registered provider ${registered.name} != opencode-go`)
-    if (!config) localProblems.push("registerProvider got no config")
+    if (!config) localProblems.push("registerProvider got no opencode-go config")
     if (config && config.baseUrl !== "https://opencode.ai/zen/go/v1")
       localProblems.push(`baseUrl ${config.baseUrl} != https://opencode.ai/zen/go/v1`)
     const mimo = config?.models?.find((model) => model.id === "mimo-v2.6-pro")
@@ -232,10 +231,16 @@ async function main(): Promise<number> {
     if (mimo && (mimo.cost.input !== 0.435 || mimo.cost.cacheRead !== 0.003625))
       localProblems.push(`mimo cost ${JSON.stringify(mimo.cost)} mis-mapped`)
     if (mimo && mimo.reasoning !== true) localProblems.push("mimo reasoning flag lost")
-    if (!config?.oauth || !config?.usage || !config?.fetchDynamicModels)
-      localProblems.push("config missing oauth/usage/fetchDynamicModels")
-    const listed = getOAuthProviders().find((entry) => entry.id === "opencode-go")
-    if (!listed) localProblems.push("auth-broker listing missing opencode-go after host-mirrored registration")
+    if (!config?.usage || !config?.fetchDynamicModels)
+      localProblems.push("config missing usage/fetchDynamicModels")
+    const listed = getOAuthProviders().find((entry) => entry.id === "opencode")
+    if (!listed) localProblems.push("auth-broker listing missing 'opencode' login")
+    if (listed && listed.storeCredentialsAs !== "opencode-go")
+      localProblems.push(`login stores as ${listed.storeCredentialsAs} != opencode-go`)
+    const loginOauth = loginConfig?.oauth as { storeCredentialsAs?: string } | undefined
+    if (!loginOauth) localProblems.push("login-only registerProvider call missing oauth")
+    if (loginOauth && loginOauth.storeCredentialsAs !== "opencode-go")
+      localProblems.push(`login oauth storeCredentialsAs ${loginOauth.storeCredentialsAs} != opencode-go`)
 
     const report = config?.usage
       ? await config.usage.fetchUsage(

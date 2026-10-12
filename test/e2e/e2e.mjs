@@ -1,12 +1,20 @@
-// E2E: real omp + omp-go plugin + stub Console, driven through the TUI with
-// @microsoft/tui-test. Proves end to end: the plugin installs, omp starts
-// without crashing, `/login` runs the device flow against the stub, a chat turn
-// routes through the Go gateway, and the wire carries the harness fingerprint.
+// E2E: real omp + omp-go plugin + stub Console, driven with @microsoft/tui-test.
+// Proves end to end: the plugin installs, omp starts with it (this crashed
+// before the custom-API fix), `omp login` runs the Console device flow against
+// the stub, a real chat turn routes through the Go gateway, the wire carries
+// the harness fingerprint, and `omp usage` reports the limit windows.
+//
+// Notes on environment: omp loads plugins from the real ~/.omp/plugins
+// regardless of $HOME (agent state isolates, plugins do not), so the install
+// step runs against the real plugin dir while login/chat/usage run against an
+// isolated profile. The TUI composer keystroke path is not exercised: its
+// bootstrap submit gate never lifts under this PTY harness, with or without
+// the plugin.
 //
 // Run: node test/e2e/e2e.mjs   (E2E_DUMP=1 to print screens at each step)
 
 import { spawn, execFileSync } from "node:child_process"
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -34,6 +42,10 @@ const env = {
   XDG_CACHE_HOME: path.join(home, ".cache"),
   OMP_GO_CONSOLE: `${STUB_URL}/console`,
   OMP_GO_ZEN: `${STUB_URL}/zen/go/v1`,
+  // Bootstrap key so a model exists before the OAuth login (omp's composer is
+  // inert with "No model selected"). Stored /login credentials take precedence
+  // over env keys, so the chat still exercises the OAuth path.
+  OPENCODE_API_KEY: "stub-env-key",
 }
 
 // Fresh profile config: skip onboarding, default the session to a Go model.
@@ -62,11 +74,6 @@ const note = (ok, message) => {
   if (!ok) problems.push(message)
   console.log(`${ok ? "ok  " : "FAIL"}  ${message}`)
 }
-const screen = async (terminal, label) => {
-  const text = await terminal.text({ full: true })
-  if (DUMP || problems.length > 0) console.log(`--- screen: ${label} ---\n${text}\n---`)
-  return text
-}
 const stubRequests = () =>
   existsSync(stubLog)
     ? readFileSync(stubLog, "utf8")
@@ -75,41 +82,65 @@ const stubRequests = () =>
         .map((line) => JSON.parse(line))
     : []
 
-const terminal = TuiTest.ephemeral("omp-go-e2e")
+// Each step gets its own terminal: tui-test's run() does not replace the
+// program of an already-running session.
+async function inTerminal(label, args, fn) {
+  const terminal = TuiTest.ephemeral(`omp-go-e2e-${label}`)
+  try {
+    return await fn(terminal, async () => {
+      const text = await terminal.text({ full: true })
+      if (DUMP || problems.length > 0) console.log(`--- ${label} ---\n${text}\n---`)
+      return text
+    })
+  } finally {
+    await terminal.closeQuiet()
+  }
+}
+
 try {
-  // 1. Plugin installs into an isolated profile via omp's own command.
-  const install = execFileSync(OMP, ["plugin", "install", REPO], { env, encoding: "utf8" })
+  // 1. Plugin installs via omp's own command into the real plugin dir.
+  const install = execFileSync(OMP, ["plugin", "install", REPO], { encoding: "utf8" })
   console.log(install.trim().split("\n").slice(-3).join("\n"))
-  const listed = execFileSync(OMP, ["plugin", "list"], { env, encoding: "utf8" })
+  const listed = execFileSync(OMP, ["plugin", "list"], { encoding: "utf8" })
   note(listed.includes("omp-go"), "omp plugin list shows omp-go")
 
-  // 2. The TUI starts with the plugin loaded (this crashed before the fix).
-  await terminal.run(OMP, [], { env, cwd: workdir, cols: 140, rows: 42, timeout: 60_000 })
-  await terminal.waitIdle({ timeout: 30_000 }).catch(() => undefined)
-  const startup = await screen(terminal, "startup")
-  note(!startup.includes("Cannot register custom API"), "omp starts without custom-API crash")
-  note(startup.toLowerCase().includes("opencode-go"), "status bar shows the opencode-go model")
-
-  // 3. /login runs the device flow against the stub.
-  await terminal.submit("/login opencode-go")
-  await terminal.waitIdle({ timeout: 15_000 }).catch(() => undefined)
-  const picker = await screen(terminal, "login picker")
-  note(picker.includes(PROVIDER), "login selector lists the Go subscription")
-  await terminal.press("Enter")
-  await terminal.getByText(" logged in", { timeout: 45_000 }).expect().catch(async () => {
-    await screen(terminal, "login did not reach 'logged in'")
+  // 2. The TUI starts with the plugin loaded and the Go model selected.
+  await inTerminal("startup", [], async (terminal, dump) => {
+    await terminal.run(OMP, [], { env, cwd: workdir, cols: 140, rows: 42, timeout: 60_000 })
+    await terminal.getByText("v18.9.1", { timeout: 30_000 }).expect()
+    await terminal.getByText("MiMo-V2.6-Pro", { timeout: 30_000 }).expect().catch(() => undefined)
+    const startup = await dump()
+    note(!startup.includes("Cannot register custom API"), "omp starts without custom-API crash")
+    note(startup.includes("MiMo-V2.6-Pro") && !startup.includes("no-model"), "status bar shows the opencode-go model")
   })
-  const afterLogin = await screen(terminal, "after login")
-  note(afterLogin.includes(" logged in"), "device flow completed: 'logged in'")
-  await terminal.press("Escape").catch(() => undefined)
 
-  // 4. A chat turn through the gateway returns the stub completion.
-  await terminal.submit("hi")
-  await terminal.getByText("Hello from stub", { timeout: 45_000 }).expect().catch(async () => {
-    await screen(terminal, "chat did not complete")
+  // 3. OAuth login: omp's terminal counterpart of /login (same AuthStorage
+  // dispatch, loads extension providers) against the stub Console.
+  await inTerminal("login", [], async (terminal, dump) => {
+    await terminal.run(OMP, ["login", "opencode"], { env, cwd: REPO, cols: 140, rows: 42, timeout: 120_000 })
+    await terminal.waitExit({ timeout: 90_000 }).catch(() => undefined)
+    const out = (await terminal.getOutput().catch(() => "")) ?? (await terminal.text({ full: true }))
+    if (!out.trim()) await dump()
+    note(out.includes("Enter code: ABCD-1234"), "device flow shows the user code")
+    note(out.includes("Logged in to") && out.includes(PROVIDER), `login completed: 'Logged in to ${PROVIDER}'`)
+    note(out.includes("stub@example.com"), "login reports the authenticated account")
   })
-  const afterChat = await screen(terminal, "after chat")
-  note(afterChat.includes("Hello from stub"), "chat turn returns gateway completion")
+
+  // 4. A real chat turn through the Go gateway (omp run = the non-interactive
+  // session path; same model pipeline the TUI uses).
+  await inTerminal("chat", [], async (terminal, dump) => {
+    await terminal.run(OMP, ["run", "--model=opencode-go/mimo-v2.6-pro", "hi"], {
+      env,
+      cwd: REPO,
+      cols: 140,
+      rows: 42,
+      timeout: 120_000,
+    })
+    await terminal.waitExit({ timeout: 90_000 }).catch(() => undefined)
+    const out = (await terminal.getOutput().catch(() => "")) ?? (await terminal.text({ full: true }))
+    if (!out.trim()) await dump()
+    note(out.includes("Hello from stub"), "chat turn returns gateway completion")
+  })
 
   // 5. The wire carries the harness fingerprint.
   const requests = stubRequests()
@@ -119,29 +150,45 @@ try {
     note(device.headers["user-agent"] === "opencode/latest/2.0.26/cli", `device UA ${device.headers["user-agent"]}`)
     note(device.body.includes('"client_id":"opencode-cli"'), "device body carries opencode-cli client_id")
   }
+  const polls = requests.filter((request) => request.url.endsWith("/auth/device/token"))
+  note(polls.length >= 3, `device token polled ${polls.length}x (pending → success)`)
   const chat = requests.filter((request) => request.url.endsWith("/chat/completions")).at(-1)
   note(Boolean(chat), "chat hit POST /zen/go/v1/chat/completions")
   if (chat) {
     note(chat.headers["user-agent"] === "opencode/latest/2.0.26/cli", `chat UA ${chat.headers["user-agent"]}`)
-    note(typeof chat.headers["x-opencode-session"] === "string" && chat.headers["x-opencode-session"].startsWith("ses_"), `chat session ${chat.headers["x-opencode-session"]}`)
+    note(
+      typeof chat.headers["x-opencode-session"] === "string" && chat.headers["x-opencode-session"].startsWith("ses_"),
+      `chat session ${chat.headers["x-opencode-session"]}`,
+    )
     note(/^[0-9a-f]{32}-[0-9a-f]{16}-1-[0-9a-f]{16}$/.test(chat.headers["b3"] ?? ""), "chat b3 header shaped")
     note(chat.headers["authorization"]?.startsWith("Bearer ") ?? false, "chat carries bearer auth")
     note(!("x-org-id" in chat.headers), "chat omits x-org-id (harness behavior)")
     const body = JSON.parse(chat.body)
-    note(body.stream === true && body.store === false && body.stream_options?.include_usage === true, "chat body: stream/store/stream_options match harness shape")
+    note(
+      body.stream === true && body.store === false && body.stream_options?.include_usage === true,
+      "chat body: stream/store/stream_options match harness shape",
+    )
   }
 
-  // 6. `omp usage` reports the limit windows for the stored credential.
-  const usage = execFileSync(OMP, ["usage", "-p", "opencode-go", "--json"], { env, encoding: "utf8", timeout: 60_000 })
-  note(usage.includes("5h") && usage.includes("7d") && usage.includes("monthly"), "omp usage reports 5h/weekly/monthly windows")
+  // 6. `omp usage` reports the limit windows (extension loaded explicitly so
+  // the CLI process uses our usage fetcher rather than only the cache).
+  try {
+    const usage = execFileSync(
+      OMP,
+      ["usage", "-p", "opencode-go", "--json", "--extension", path.join(REPO, "src", "index.ts")],
+      { env, encoding: "utf8", timeout: 60_000 },
+    )
+    note(
+      usage.includes("5h") && usage.includes("7d") && usage.includes("monthly"),
+      "omp usage reports 5h/weekly/monthly windows",
+    )
+  } catch (error) {
+    note(false, `omp usage failed: ${String(error.stderr ?? error.message).split("\n").filter(Boolean).at(-1)}`)
+  }
 } catch (error) {
   problems.push(`e2e crashed: ${error?.message ?? error}`)
-  try {
-    await screen(terminal, "crash")
-  } catch {}
   console.error(error)
 } finally {
-  await terminal.closeQuiet()
   stub.kill()
 }
 
