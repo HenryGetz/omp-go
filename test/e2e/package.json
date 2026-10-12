@@ -1,0 +1,8 @@
+{
+  "name": "omp-go-e2e",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@microsoft/tui-test": "^0.1.0"
+  }
+}

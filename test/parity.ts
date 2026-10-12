@@ -16,6 +16,9 @@ import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import path from "node:path"
 import type { ExtensionAPI, ProviderConfig } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types"
+import type { SimpleStreamOptions } from "@oh-my-pi/pi-ai"
+import { registerCustomApi } from "@oh-my-pi/pi-ai/api-registry"
+import { registerOAuthProvider, getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth"
 import { OpencodeOAuthProvider } from "../src/opencode-provider"
 import { registerOpencodeGo } from "../src/register"
 import { fetchConsoleConfig, zenChatCompletion, type SessionIdentity } from "../src/wire"
@@ -193,12 +196,23 @@ async function main(): Promise<number> {
       },
     )
 
-    // Limits + models + registration through the real extension seam.
+    // Limits + models + registration through the real extension seam. The fake
+    // `pi` mirrors the host's registerProvider internals (model-registry.ts):
+    // registerCustomApi + registerOAuthProvider — so pi-ai's real validation,
+    // including "built-in API names are reserved", runs here too. A config that
+    // crashes omp startup fails this test instead.
     const registered: { name?: string; config?: ProviderConfig } = {}
     const fakePi = {
       registerProvider: (name: string, config: ProviderConfig) => {
         registered.name = name
         registered.config = config
+        if (config.streamSimple && config.api) {
+          const streamSimpleFn = config.streamSimple
+          registerCustomApi(config.api, streamSimpleFn, "parity-test", (model, context, options) =>
+            streamSimpleFn(model, context, options as SimpleStreamOptions),
+          )
+        }
+        if (config.oauth) registerOAuthProvider({ ...config.oauth, id: name, sourceId: "parity-test" })
       },
       on: () => undefined,
     } as unknown as ExtensionAPI
@@ -220,6 +234,8 @@ async function main(): Promise<number> {
     if (mimo && mimo.reasoning !== true) localProblems.push("mimo reasoning flag lost")
     if (!config?.oauth || !config?.usage || !config?.fetchDynamicModels)
       localProblems.push("config missing oauth/usage/fetchDynamicModels")
+    const listed = getOAuthProviders().find((entry) => entry.id === "opencode-go")
+    if (!listed) localProblems.push("auth-broker listing missing opencode-go after host-mirrored registration")
 
     const report = config?.usage
       ? await config.usage.fetchUsage(
