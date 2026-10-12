@@ -1,0 +1,4 @@
+opencode/
+node_modules
+test/omp-requests.ndjson
+.DS_Store

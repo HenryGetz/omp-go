@@ -1,0 +1,156 @@
+// opencode-go usage/limits reporting for omp.
+//
+// Endpoint contract (reverse-engineered; the route is a thin proxy to the
+// inference backend at packages/console/app/src/routes/zen/go/v1/usage.ts in
+// github.com/anomalyco/opencode and is undocumented upstream):
+//
+//   GET {base}/v1/usage
+//   → { "usage": {
+//        "rolling": { "percent": 0-100, "status": "ok"|"rate-limited", "resetsAt": ISO },
+//        "weekly":  { ... },
+//        "monthly": { ... } } }
+//
+// Windows: rolling 5h, weekly 7d, monthly anchored on the subscription
+// anniversary (deliberately no duration). `percent` is a floored, clamped
+// used-fraction; `resetsAt` is computed server-side.
+//
+// The harness itself never calls this route (verified: no callers in
+// packages/{core,cli,tui,app}); it is the surface omp's `omp usage` reads and
+// the Console website displays. Errors carry `{"error":{"message":…}}`;
+// 401/403 are credential problems and must fail loudly for health checks.
+
+import type {
+  UsageAmount,
+  UsageFetchContext,
+  UsageFetchParams,
+  UsageLimit,
+  UsageProvider,
+  UsageReport,
+  UsageStatus,
+  UsageWindow,
+} from "@oh-my-pi/pi-ai"
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error"
+import { sessionHeaders, type HarnessIdentity, type SessionIdentity } from "./wire"
+
+export const OPENCODE_GO_PROVIDER = "opencode-go"
+
+const HOUR_MS = 3_600_000
+const DAY_MS = 86_400_000
+
+const WINDOWS = [
+  { key: "rolling", limitId: "rolling-5h", windowId: "5h", label: "5 Hour", durationMs: 5 * HOUR_MS },
+  { key: "weekly", limitId: "weekly", windowId: "7d", label: "Weekly", durationMs: 7 * DAY_MS },
+  // Monthly anchors on the subscription anniversary: no fixed duration.
+  { key: "monthly", limitId: "monthly", windowId: "monthly", label: "Monthly", durationMs: undefined },
+] as const
+
+export type OpencodeGoUsageOptions = {
+  /** Session identity emitted on the wire (x-opencode-* + client name). */
+  session: SessionIdentity
+  identity?: HarnessIdentity
+}
+
+type WindowPayload = { percent?: unknown; status?: unknown; resetsAt?: unknown }
+
+function statusOf(windowStatus: unknown, usedFraction: number): UsageStatus {
+  if (windowStatus === "rate-limited") return "exhausted"
+  if (usedFraction >= 1) return "exhausted"
+  if (usedFraction >= 0.8) return "warning"
+  return "ok"
+}
+
+function windowLimit(
+  descriptor: (typeof WINDOWS)[number],
+  payload: unknown,
+): UsageLimit | undefined {
+  if (payload === null || typeof payload !== "object") return undefined
+  const { percent, status, resetsAt } = payload as WindowPayload
+  if (
+    typeof percent !== "number" ||
+    !Number.isFinite(percent) ||
+    percent < 0 ||
+    percent > 100 ||
+    (status !== "ok" && status !== "rate-limited")
+  )
+    return undefined
+  const resetsAtMs = typeof resetsAt === "string" ? Date.parse(resetsAt) : Number.NaN
+  if (!Number.isFinite(resetsAtMs)) return undefined
+  const usedFraction = percent / 100
+  const window: UsageWindow = { id: descriptor.windowId, label: descriptor.label, resetsAt: resetsAtMs }
+  if (descriptor.durationMs !== undefined) window.durationMs = descriptor.durationMs
+  const amount: UsageAmount = {
+    used: percent,
+    usedFraction,
+    remainingFraction: Math.max(0, 1 - usedFraction),
+    unit: "percent",
+  }
+  return {
+    id: descriptor.limitId,
+    label: `${descriptor.label} limit`,
+    scope: { provider: OPENCODE_GO_PROVIDER, windowId: descriptor.windowId, shared: true },
+    window,
+    amount,
+    status: statusOf(status, usedFraction),
+  }
+}
+
+/**
+ * `GET {base}/usage` with the harness fingerprint (User-Agent, x-opencode-*,
+ * b3/traceparent) plus `authorization: Bearer <access|key>`.
+ *
+ * Note: unlike login/inference, this request has no golden harness trace —
+ * the harness has no caller for this route. The header set is derived from the
+ * gateway's own requirement (`x-opencode-session`, per upstream change of
+ * 09/06) plus the harness conventions for gateway requests.
+ */
+export function opencodeGoUsageProvider(options: OpencodeGoUsageOptions): UsageProvider {
+  return {
+    id: OPENCODE_GO_PROVIDER,
+    validatesCredentials: true,
+    windowDefaults: { primaryMs: 5 * HOUR_MS, secondaryMs: 7 * DAY_MS },
+    async fetchUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
+      const token =
+        params.credential.type === "api_key" ? params.credential.apiKey : params.credential.accessToken
+      if (!token) return null
+      // Accept both catalog spellings ("zen/go" and "zen/go/v1") like omp's built-in.
+      const stripped = (params.baseUrl ?? "https://opencode.ai/zen/go").trim().replace(/\/+$/, "").replace(/\/v1$/i, "")
+      const response = await ctx.fetch(`${stripped}/v1/usage`, {
+        headers: {
+          accept: "application/json",
+          authorization: `Bearer ${token}`,
+          ...sessionHeaders(options.session, options.identity),
+        },
+        signal: params.signal,
+      })
+      if (!response.ok) {
+        // 401/403 are credential verdicts: fail loudly so health checks flag the
+        // credential instead of reporting unknown status.
+        if (response.status === 401 || response.status === 403) {
+          let detail: string | undefined
+          try {
+            const payload = (await response.json()) as { error?: { message?: unknown } }
+            detail = typeof payload.error?.message === "string" ? payload.error.message : undefined
+          } catch {
+            detail = undefined
+          }
+          throw new ProviderHttpError(
+            `OpenCode Go usage endpoint returned ${response.status}${detail ? `: ${detail}` : ""}`,
+            response.status,
+          )
+        }
+        // Transient: keep the last good report.
+        return null
+      }
+      const payload = (await response.json().catch(() => undefined)) as { usage?: unknown } | undefined
+      if (!payload || typeof payload !== "object" || typeof payload.usage !== "object" || payload.usage === null)
+        return null
+      const windows = payload.usage as Record<string, unknown>
+      // Decode defensively: skip malformed windows rather than failing the report.
+      const limits = WINDOWS.flatMap((descriptor) => {
+        const limit = windowLimit(descriptor, windows[descriptor.key])
+        return limit ? [limit] : []
+      })
+      return { provider: OPENCODE_GO_PROVIDER, fetchedAt: Date.now(), limits, raw: payload }
+    },
+  }
+}

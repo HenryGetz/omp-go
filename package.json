@@ -1,0 +1,30 @@
+{
+  "name": "omp-go",
+  "version": "0.1.0",
+  "description": "OpenCode Go subscription for Oh My Pi: native OAuth login, all 36 Go models, and usage limits — wire-identical to the opencode harness.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "omp": {
+    "extensions": ["./src/index.ts"]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HenryGetz/omp-go"
+  },
+  "author": "Henry Getz",
+  "license": "MIT",
+  "keywords": [
+    "oh-my-pi",
+    "omp",
+    "pi-coding-agent",
+    "extension",
+    "plugin",
+    "opencode",
+    "opencode-go",
+    "oauth"
+  ],
+  "scripts": {
+    "test": "bun test/parity.ts",
+    "typecheck": "tsc --noEmit"
+  }
+}
