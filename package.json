@@ -1,11 +1,13 @@
 {
   "name": "omp-go",
-  "version": "0.1.0",
-  "description": "OpenCode Go subscription for Oh My Pi: native OAuth login, all 36 Go models, and usage limits — wire-identical to the opencode harness.",
+  "version": "0.2.0",
+  "description": "OpenCode Go subscription for Oh My Pi: native OAuth login, all 36 Go models, and usage limits \u2014 wire-identical to the opencode harness.",
   "type": "module",
   "main": "./src/index.ts",
   "omp": {
-    "extensions": ["./src/index.ts"]
+    "extensions": [
+      "./src/index.ts"
+    ]
   },
   "repository": {
     "type": "git",
