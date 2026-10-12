@@ -6,6 +6,23 @@ import { appendFileSync } from "node:fs"
 const LOG = process.env.STUB_LOG ?? "requests.ndjson"
 const PORT = Number(process.env.STUB_PORT ?? 18987)
 let devicePolls = 0
+// One distinct account per completed device login (multi-account tests).
+let accountSeq = 0
+const accounts = new Map([
+  [1, { userId: "usr_stub_1", email: "stub@example.com", orgId: "org_42", orgName: "Alpha Org" }],
+])
+function accountFor(n) {
+  if (!accounts.has(n))
+    accounts.set(n, { userId: `usr_stub_${n}`, email: `stub${n}@example.com`, orgId: `org_${42 + n}`, orgName: `Stub Org ${n}` })
+  return accounts.get(n)
+}
+// Rotated tokens are issued as at_stub_(100+n); map back to the account.
+function tokenAccountNumber(value) {
+  const match = /(?:at|rt)_stub_(\d+)/.exec(String(value ?? ""))
+  if (!match) return 1
+  const n = Number(match[1])
+  return n >= 100 ? n - 100 : n
+}
 
 function record(req, body) {
   const entry = {
@@ -44,29 +61,39 @@ createServer((req, res) => {
       if (grant === "urn:ietf:params:oauth:grant-type:device_code") {
         devicePolls += 1
         if (devicePolls <= 2) return send(res, 200, { error: "authorization_pending" })
+        accountSeq += 1
+        const acct = accountFor(accountSeq)
         return send(res, 200, {
-          access_token: "at_stub_1",
-          refresh_token: "rt_stub_1",
+          access_token: `at_stub_${accountSeq}`,
+          refresh_token: `rt_stub_${accountSeq}`,
           expires_in: 2,
-          org_id: "org_42",
+          org_id: acct.orgId,
         })
       }
-      if (grant === "refresh_token")
+      if (grant === "refresh_token") {
+        const n = tokenAccountNumber(JSON.parse(body).refresh_token)
+        const acct = accountFor(n)
+        // Rotated tokens offset by 100 so they stay distinct per account.
         return send(res, 200, {
-          access_token: "at_stub_2",
-          refresh_token: "rt_stub_2",
+          access_token: `at_stub_${100 + n}`,
+          refresh_token: `rt_stub_${100 + n}`,
           expires_in: 3600,
-          org_id: "org_42",
+          org_id: acct.orgId,
         })
+      }
       return send(res, 400, { error: "unsupported_grant_type" })
     }
-    if (req.method === "GET" && p === "/console/api/user")
-      return send(res, 200, { id: "usr_stub_1", email: "stub@example.com" })
-    if (req.method === "GET" && p === "/console/api/orgs")
+    if (req.method === "GET" && p === "/console/api/user") {
+      const acct = accountFor(tokenAccountNumber(req.headers.authorization))
+      return send(res, 200, { id: acct.userId, email: acct.email })
+    }
+    if (req.method === "GET" && p === "/console/api/orgs") {
+      const acct = accountFor(tokenAccountNumber(req.headers.authorization))
       return send(res, 200, [
         { id: "org_1", name: "Zeta Org" },
-        { id: "org_42", name: "Alpha Org" },
+        { id: acct.orgId, name: acct.orgName },
       ])
+    }
     if (req.method === "GET" && p === "/console/api/v2/config")
       return send(res, 200, { providers: { "opencode-go": {} } })
     if (req.method === "POST" && p === "/zen/go/v1/chat/completions") {

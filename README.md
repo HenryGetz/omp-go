@@ -20,7 +20,9 @@ code appears, tokens rotate themselves. Revolutionary.
 - **Models.** All 36 of them. `mimo-v2.6-pro`, `grok-4.7`, whatever a "fledge"
   is. Live from models.dev, cached when the wifi gives up.
 - **Limits.** `omp usage` shows the 5h / weekly / monthly windows, so you can
-  watch the monthly one climb like everyone else.
+  watch the monthly one climb like everyone else. Log in with a second account
+  (`/login` again — or `omp login opencode`) and omp pools and load-balances
+  across both, ranking by remaining quota. Two accounts, double the cope.
 - **Fingerprint.** Same `User-Agent`, same headers, same bodies. The server
   cannot tell. That is the entire point of this repo.
 
