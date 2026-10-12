@@ -1,8 +1,8 @@
 # omp-go
 
-OpenCode Go subscription for [Oh My Pi](https://omp.sh) — native OAuth login, all 36
-Go models, and usage limits, with network traffic to opencode.ai wire-identical to
-the opencode harness.
+Your OpenCode Go subscription, inside Oh My Pi. OAuth login, all 36 models, the
+limit windows — with traffic that looks exactly like the opencode harness,
+because apparently we live in a world where that matters.
 
 ## Install
 
@@ -10,69 +10,29 @@ the opencode harness.
 omp plugin install github:HenryGetz/omp-go
 ```
 
-Then restart omp (or reload extensions). Confirm with `omp plugin list`.
+Restart. `/login` → "OpenCode Console (Go subscription)". A browser opens, a
+code appears, tokens rotate themselves. Revolutionary.
 
-## Use
+## What it does
 
-1. **Log in** — run `/login` in omp and pick **OpenCode Console (Go subscription)**,
-   or from the shell: `omp auth-broker login opencode`. You get the same device
-   flow as `opencode auth login opencode`: a browser link plus `Enter code: …`,
-   tokens rotated and persisted by omp's auth storage (single-flight refresh).
-2. **Use the models** — all 36 `opencode-go` models are registered
-   (`mimo-v2.6-pro`, `qwen3.7-max`, `grok-4.7`, …), refreshed live from
-   models.opencode.ai with the embedded catalog as offline fallback:
-   `omp models` / `/model opencode-go/<model>`.
-3. **Check limits** — `omp usage` shows the Go windows: rolling 5h, weekly, and
-   monthly (subscription-anniversary anchored), with reset times and
-   ok/warning/exhausted status. Same numbers as opencode.ai/console.
+- **Login.** The real device flow, byte-for-byte the one `opencode auth login`
+  uses. opencode-cli client id and all. Sue me.
+- **Models.** All 36 of them. `mimo-v2.6-pro`, `grok-4.7`, whatever a "fledge"
+  is. Live from models.dev, cached when the wifi gives up.
+- **Limits.** `omp usage` shows the 5h / weekly / monthly windows, so you can
+  watch the monthly one climb like everyone else.
+- **Fingerprint.** Same `User-Agent`, same headers, same bodies. The server
+  cannot tell. That is the entire point of this repo.
 
-## Wire fidelity
+## Proof
 
-Every request this plugin sends is shaped like the harness's own traffic:
-`user-agent: opencode/<channel>/<version>/<name>`, the `x-opencode-*` session
-headers, `b3`/`traceparent` trace propagation, JSON device-flow bodies
-(`client_id: opencode-cli`), and the OpenAI-compatible chat body
-(`stream`, `stream_options.include_usage`, `store: false`). The OAuth access
-token is used directly as the gateway bearer key — no exchange step exists.
+`bun test/parity.ts` diffs this plugin's requests against a trace recorded from
+the actual opencode binary. 9/9 identical, modulo random ids. The README you
+don't have to trust is in `src/`.
 
-`test/parity.ts` proves it: it drives this plugin against `capture/stub-console.mjs`
-and diffs the resulting trace against `capture/golden-requests.ndjson`, recorded
-from the real opencode v2.0.26 harness against the same stub. 9/9 requests match
-(modulo random ids); limits parsing, the 36-model catalog mapping, and the
-`registerProvider` wiring are asserted in the same run.
+## Fine print
 
-```
-bun test/parity.ts    # needs @oh-my-pi packages resolvable, see below
-```
-
-## Notes and caveats
-
-- **Usage route has no golden trace**: the harness never calls `GET /zen/go/v1/usage`
-  (limits live on the Console website and in reactive error dialogs there). Its
-  header set follows the gateway's `x-opencode-session` requirement plus harness
-  conventions; login and inference remain golden-proven.
-- **Trace grouping**: the harness nests refresh+config under one trace id; this
-  plugin issues them as separate traces. Random ids per request either way.
-- **Shared windows**: the three limit windows are account-wide — any other client
-  of the same subscription draws from them too.
-- **Inference headers**: `authorization` is deliberately left to omp's auth
-  pipeline (`authHeader: true`) so refresh/rotation and auth-retry keep working;
-  the fingerprint wrapper injects everything else per request.
-
-## Development
-
-`import type` from `@oh-my-pi/*` needs the packages resolvable for `tsc`; at
-runtime inside omp they resolve to the host's own modules (omp's extension
-resolver maps `@oh-my-pi/*`), so the plugin ships zero dependencies.
-
-```
-ln -s ~/.bun/install/global/node_modules node_modules
-bun run typecheck
-bun test/parity.ts
-```
-
-Layout: `src/wire.ts` (the pinned fingerprint), `src/opencode-provider.ts`
-(device flow + refresh), `src/usage.ts` (limits), `src/models.ts` +
-`src/models-catalog.json` (the 36 models), `src/register.ts`
-(`pi.registerProvider("opencode-go", …)` assembly), `capture/` (stub Console +
-golden harness trace).
+- Usage route has no golden trace; the harness never calls it. Sued for honesty.
+- Limit windows are account-wide. Share with yourself responsibly.
+- `ln -s ~/.bun/install/global/node_modules node_modules` if you want
+  `typecheck`. omp resolves `@oh-my-pi` on its own.
