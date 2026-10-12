@@ -21,8 +21,13 @@ import type {
   ExtensionAPI,
   ProviderConfig,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types"
-import { streamSimple } from "@oh-my-pi/pi-ai/stream"
 import type { Model, SimpleStreamOptions, Context, AssistantMessageEventStream } from "@oh-my-pi/pi-ai"
+// Import from the package root, never `@oh-my-pi/pi-ai/stream`. omp's extension
+// loader only rewrites host-bundled specifiers that appear as explicit package
+// exports; `./stream` matches pi-ai's `./*` catch-all, so a compiled host cannot
+// resolve it and the extension fails to load ("Cannot find package
+// '@oh-my-pi/pi-ai'"). The root re-exports `streamSimple` (`export * from "./stream"`).
+import { streamSimple } from "@oh-my-pi/pi-ai"
 import { OpencodeOAuthProvider } from "./opencode-provider"
 import { catalogModels, fetchCatalogModels } from "./models"
 import { OPENCODE_GO_PROVIDER, opencodeGoUsageProvider } from "./usage"
