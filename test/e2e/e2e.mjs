@@ -129,7 +129,7 @@ try {
   // 4. A real chat turn through the Go gateway (omp run = the non-interactive
   // session path; same model pipeline the TUI uses).
   await inTerminal("chat", [], async (terminal, dump) => {
-    await terminal.run(OMP, ["run", "--model=opencode-go/mimo-v2.6-pro", "hi"], {
+    await terminal.run(OMP, ["run", "--print", "--no-title", "--model=opencode-go/mimo-v2.6-pro", "hi"], {
       env,
       cwd: REPO,
       cols: 140,
