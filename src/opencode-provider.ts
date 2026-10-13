@@ -167,12 +167,8 @@ export class OpencodeOAuthProvider implements OAuthProviderInterface {
       fetch: doFetch,
     })
     // Keep the models.yml fingerprint block current with this workspace,
-    // including the Console-config endpoint fetched just above.
-    writeModelsOverride({
-      baseURL: providerOverride(org?.id, "opencode-go").baseURL,
-      orgId: org?.id,
-      identity: this.options.identity,
-    })
+    // including the Console-config endpoints fetched just above.
+    writeModelsOverride({ orgId: org?.id, identity: this.options.identity })
     return {
       refresh: token.refresh_token,
       access: token.access_token,

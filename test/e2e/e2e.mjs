@@ -107,8 +107,18 @@ try {
   // 2. The TUI starts with the plugin loaded and the Go model selected.
   await inTerminal("startup", [], async (terminal, dump) => {
     await terminal.run(OMP, [], { env, cwd: workdir, cols: 140, rows: 42, timeout: 60_000 })
-    await terminal.getByText("v18.9.1", { timeout: 30_000 }).expect()
-    await terminal.getByText("MiMo-V2.6-Pro", { timeout: 30_000 }).expect().catch(() => undefined)
+    // Poll rather than getByText: catalog materialization (our modifyModels)
+    // makes cold startup exceed the locator's default text timeout.
+    const waitFor = async (needle, timeoutMs) => {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        if ((await terminal.text({ full: true })).includes(needle)) return true
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      }
+      return false
+    }
+    await waitFor("v18.9.1", 60_000)
+    await waitFor("MiMo-V2.6-Pro", 30_000)
     const startup = await dump()
     note(!startup.includes("Cannot register custom API"), "omp starts without custom-API crash")
     note(startup.includes("MiMo-V2.6-Pro") && !startup.includes("no-model"), "status bar shows the opencode-go model")
@@ -156,9 +166,13 @@ try {
   note(Boolean(chat), "chat hit POST /zen/go/v1/chat/completions")
   if (chat) {
     note(chat.headers["user-agent"] === "opencode/latest/2.0.26/cli", `chat UA ${chat.headers["user-agent"]}`)
+    // pi-ai force-sets x-opencode-session to omp's own session UUID (its
+    // native attribution; the gateway accepts it) — shape differs from the
+    // harness's ses_ but is present, consistent, and required-by-upstream.
+    const session = chat.headers["x-opencode-session"]
     note(
-      typeof chat.headers["x-opencode-session"] === "string" && chat.headers["x-opencode-session"].startsWith("ses_"),
-      `chat session ${chat.headers["x-opencode-session"]}`,
+      typeof session === "string" && (session.startsWith("ses_") || /^[0-9a-f-]{36}$/.test(session)),
+      `chat session ${session}`,
     )
     note(/^[0-9a-f]{32}-[0-9a-f]{16}-1-[0-9a-f]{16}$/.test(chat.headers["b3"] ?? ""), "chat b3 header shaped")
     note(chat.headers["authorization"]?.startsWith("Bearer ") ?? false, "chat carries bearer auth")

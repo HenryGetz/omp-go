@@ -22,7 +22,7 @@ import { registerOAuthProvider, getOAuthProviders } from "@oh-my-pi/pi-ai/regist
 import { OpencodeOAuthProvider } from "../src/opencode-provider"
 import { registerOpencodeGo } from "../src/register"
 import { providerOverride } from "../src/console-config"
-import { fetchConsoleConfig, zenChatCompletion, type SessionIdentity } from "../src/wire"
+import { fetchConsoleConfig, zenChatCompletion, zenChatCompletion as freeChat, type SessionIdentity } from "../src/wire"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO = path.resolve(HERE, "..")
@@ -164,6 +164,14 @@ function diff(expected: unknown, actual: unknown, trail: string, problems: strin
 // --- scenario ----------------------------------------------------------------
 
 async function main(): Promise<number> {
+  // The Console-config cache persists per profile with a 60s TTL; clear it so
+  // the login-time config fetch is always exercised (the golden trace has it).
+  try {
+    const { rmSync } = await import("node:fs")
+    const { homedir } = await import("node:os")
+    const path = await import("node:path")
+    rmSync(path.join(homedir(), ".omp", "agent", "omp-go-console-config.json"), { force: true })
+  } catch {}
   const stub = await startStub()
   try {
     const base = `http://127.0.0.1:${PORT}/console`
@@ -178,7 +186,7 @@ async function main(): Promise<number> {
     // Mirror the wrapper's request assembly: the Console config dictates the
     // endpoint and pushed headers, the credential supplies the org attribution.
     const override = providerOverride(rotated.orgId, "opencode-go")
-    await zenChatCompletion(
+    await freeChat(
       {
         model: "mimo-v2.6-pro",
         messages: [
@@ -191,6 +199,33 @@ async function main(): Promise<number> {
       {
         token: rotated.access,
         base: override.baseURL ?? `http://127.0.0.1:${PORT}/zen/go/v1`,
+        orgId: rotated.orgId,
+        session: {
+          session: `ses_${"e".repeat(26)}`,
+          affinity: `ses_${"e".repeat(26)}`,
+          project: "a".repeat(40),
+          client: "cli",
+        },
+      },
+    )
+
+    // Free-tier (Zen) turn: same fingerprint, config-driven /inference/openai
+    // endpoint, no `store` field (matches the harness's free-model body).
+    const zenOverride = providerOverride(rotated.orgId, "opencode")
+    await freeChat(
+      {
+        model: "mimo-v2.6-flash-free",
+        messages: [
+          { role: "system", content: "system prompt" },
+          { role: "user", content: "hi" },
+        ],
+        tools: [{ type: "function", function: { name: "tool", parameters: {} } }],
+        maxCompletionTokens: 32000,
+        omitStore: true,
+      },
+      {
+        token: rotated.access,
+        base: zenOverride.baseURL ?? `http://127.0.0.1:${PORT}/zen/v1`,
         orgId: rotated.orgId,
         session: {
           session: `ses_${"e".repeat(26)}`,
@@ -228,8 +263,12 @@ async function main(): Promise<number> {
     if (config && config.baseUrl !== "https://opencode.ai/zen/go/v1")
       localProblems.push(`baseUrl ${config.baseUrl} != https://opencode.ai/zen/go/v1`)
     const mimo = config?.models?.find((model) => model.id === "mimo-v2.6-pro")
-    if (!config?.models || config.models.length !== 36)
-      localProblems.push(`catalog models ${config?.models?.length} != 36`)
+    const catalogJson = JSON.parse(
+      readFileSync(new URL("../src/models-catalog.json", import.meta.url), "utf8"),
+    ) as { models: Record<string, { status?: string }> }
+    const liveCount = Object.values(catalogJson.models).filter((m) => m.status !== "deprecated").length
+    if (!config?.models || config.models.length !== liveCount)
+      localProblems.push(`catalog models ${config?.models?.length} != live count ${liveCount} (deprecated filtered)`)
     if (!mimo) localProblems.push("mimo-v2.6-pro missing from catalog")
     if (mimo && (mimo.contextWindow !== 1048576 || mimo.maxTokens !== 131072))
       localProblems.push(`mimo limits ${mimo.contextWindow}/${mimo.maxTokens} != 1048576/131072`)
@@ -275,9 +314,15 @@ async function main(): Promise<number> {
     // Golden: [0..5] login identity flow, [6..8] refresh + two config fetches
     // (login-time and session-start, order varies), [9] harness title-gen call
     // (harness-only), [10] main inference turn.
+    const goldenFreeChats = golden.filter((row) => row.url.includes("/inference/openai/") && row.url.includes("chat"))
     const pairs: Array<[WireRequest, WireRequest, string]> = [
       ...Array.from({ length: 6 }, (_, index) => [golden[index], got[index], `request ${index}`] as const),
-      [golden[10], got.find((row) => row.url.includes("chat/completions")) as WireRequest, "request (inference)"],
+      [golden[10], got.find((row) => row.url.includes("/inference/go/")) as WireRequest, "request (go inference)"],
+      [
+        goldenFreeChats[0],
+        got.filter((row) => row.url.includes("/inference/openai/")).at(-1) as WireRequest,
+        "request (free-tier inference)",
+      ],
     ] as Array<[WireRequest, WireRequest, string]>
 
     const problems = [...localProblems, ...fingerprintChecks(got, "omp"), ...fingerprintChecks(golden, "harness")]

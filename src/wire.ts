@@ -19,6 +19,7 @@ export const DEFAULT_IDENTITY: HarnessIdentity = { channel: "latest", version: "
 
 export const CONSOLE_BASE = "https://opencode.ai/console"
 export const ZEN_GO_BASE = "https://opencode.ai/zen/go/v1"
+export const ZEN_BASE = "https://opencode.ai/inference/v1"
 export const CLIENT_ID = "opencode-cli"
 
 export const userAgent = (id: HarnessIdentity = DEFAULT_IDENTITY) =>
@@ -183,6 +184,8 @@ export type ChatRequest = {
   messages: unknown[]
   tools?: unknown[]
   maxCompletionTokens?: number
+  /** The Go catalog's main turn carries `store: false`; the free tier omits it. */
+  omitStore?: boolean
 }
 
 /** Key order matches the harness: model, messages, tools, stream, stream_options, max_completion_tokens, store. */
@@ -193,7 +196,7 @@ export const chatBody = (req: ChatRequest) => ({
   stream: true,
   stream_options: { include_usage: true },
   ...(req.maxCompletionTokens !== undefined ? { max_completion_tokens: req.maxCompletionTokens } : {}),
-  store: false,
+  ...(req.omitStore ? {} : { store: false }),
 })
 
 export async function zenChatCompletion(

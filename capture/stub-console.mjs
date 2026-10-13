@@ -115,7 +115,10 @@ createServer((req, res) => {
         },
       })
     }
-    if (req.method === "POST" && (p === "/zen/go/v1/chat/completions" || p === "/inference/go/openai/v1/chat/completions")) {
+    if (
+      req.method === "POST" &&
+      ["/zen/go/v1/chat/completions", "/inference/go/openai/v1/chat/completions", "/zen/v1/chat/completions", "/inference/v1/chat/completions", "/inference/openai/v1/chat/completions"].includes(p)
+    ) {
       const payload = JSON.parse(body || "{}")
       // Region gate: workspaces of accounts 2+ are not Global; the gateway
       // refuses Go region-gated models for them (mirrors the live 400).
@@ -153,7 +156,15 @@ createServer((req, res) => {
       res.write("data: [DONE]\n\n")
       return res.end()
     }
-    if (req.method === "GET" && p === "/zen/go/v1/usage")
+    if (req.method === "GET" && (p === "/zen/go/v1/usage" || p === "/inference/go/openai/v1/usage" || p === "/zen/v1/usage" || p === "/inference/openai/v1/usage"))
+      return send(res, 200, {
+        usage: {
+          rolling: { percent: 42, status: "ok", resetsAt: "2026-10-12T20:00:00.000Z" },
+          weekly: { percent: 85, status: "ok", resetsAt: "2026-10-15T00:00:00.000Z" },
+          monthly: { percent: 12, status: "ok", resetsAt: "2026-11-01T00:00:00.000Z" },
+        },
+      })
+    if (req.method === "GET" && p === "/zen/go/v1/usage-unused")
       return send(res, 200, {
         usage: {
           rolling: { percent: 42, status: "ok", resetsAt: "2026-10-12T20:00:00.000Z" },

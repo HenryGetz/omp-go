@@ -17,8 +17,11 @@ code appears, tokens rotate themselves. Revolutionary.
 
 - **Login.** The real device flow, byte-for-byte the one `opencode auth login`
   uses. opencode-cli client id and all. Sue me.
-- **Models.** All 36 of them. `mimo-v2.6-pro`, `grok-4.7`, whatever a "fledge"
-  is. Live from models.dev, cached when the wifi gives up.
+- **Models.** All 36 Go models plus the whole OpenCode Zen catalog, free tier
+  included. Keyless: free models authenticate as `Bearer public`, exactly like
+  the harness itself does when you're not logged in — no `sk-` key, because
+  opencode stopped issuing those. Deprecated catalog entries stay hidden, also
+  exactly like the harness.
 - **Limits.** `omp usage` shows the 5h / weekly / monthly windows, so you can
   watch the monthly one climb like everyone else. Log in with a second account
   (`/login` again — or `omp login opencode`) and omp pools and load-balances
@@ -37,6 +40,11 @@ don't have to trust is in `src/`.
 
 ## Fine print
 
+- Two honest deltas omp's core owns: model-discovery GETs (`/models`) carry
+  omp's own User-Agent (its catalog fetcher), and `x-opencode-session` is
+  force-stamped to omp's session UUID instead of a `ses_` id (both accepted
+  upstream — inference, login, config, and usage are otherwise fingerprinted,
+  including the User-Agent on every chat).
 - Quota and region rules are **per workspace**. If a model says it "requires
   Global regions", that workspace's Privacy setting is not Global — fix it in
   the Console or `/logout` that account. Pooling routes around it when a

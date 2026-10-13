@@ -7,11 +7,13 @@
 
 import type { ProviderModelConfig } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types"
 import catalog from "./models-catalog.json"
+import zenCatalog from "./models-zen-catalog.json"
 import { DEFAULT_IDENTITY, sessionHeaders, type HarnessIdentity, type SessionIdentity } from "./wire"
 
 type CatalogModel = {
   name?: string
   reasoning?: boolean
+  status?: string
   modalities?: { input?: string[] }
   limit?: { context?: number; output?: number }
   cost?: { input?: number; output?: number; cache_read?: number; cache_write?: number }
@@ -30,6 +32,19 @@ export const CATALOG_URL = "https://models.opencode.ai/api.json"
 const DEFAULT_CONTEXT = 128_000
 const DEFAULT_OUTPUT = 32_768
 
+/**
+ * Body-shape compat so omp's OpenAI-compatible builder emits the same request
+ * fields the harness does: `store`, `stream_options.include_usage`,
+ * `max_completion_tokens`, and `reasoning_content` interleaved reasoning.
+ */
+const HARNESS_COMPAT = {
+  supportsStore: true,
+  supportsUsageInStreaming: true,
+  maxTokensField: "max_completion_tokens",
+  supportsReasoningEffort: false,
+  reasoningContentField: "reasoning_content",
+} as const
+
 export function toProviderModel(id: string, model: CatalogModel): ProviderModelConfig {
   const input = (model.modalities?.input ?? ["text"]).filter(
     (modality): modality is "text" | "image" => modality === "text" || modality === "image",
@@ -47,11 +62,18 @@ export function toProviderModel(id: string, model: CatalogModel): ProviderModelC
     },
     contextWindow: model.limit?.context ?? DEFAULT_CONTEXT,
     maxTokens: model.limit?.output ?? DEFAULT_OUTPUT,
+    compat: HARNESS_COMPAT,
   }
 }
 
+export const ZEN_CATALOG = zenCatalog as CatalogEntry
+
 export function catalogModels(entry: CatalogEntry = catalog as CatalogEntry): ProviderModelConfig[] {
-  return Object.entries(entry.models).map(([id, model]) => toProviderModel(id, model))
+  // The harness hides deprecated catalog models ("Model unavailable"); mirror
+  // that so omp's picker and routing only ever see the live set.
+  return Object.entries(entry.models)
+    .filter(([, model]) => model.status !== "deprecated")
+    .map(([id, model]) => toProviderModel(id, model))
 }
 
 /**
@@ -62,6 +84,7 @@ export function catalogModels(entry: CatalogEntry = catalog as CatalogEntry): Pr
 export async function fetchCatalogModels(options: {
   session: SessionIdentity
   identity?: HarnessIdentity
+  entryID?: string
   fetch?: typeof fetch
 }): Promise<ProviderModelConfig[]> {
   const f = options.fetch ?? fetch
@@ -71,8 +94,8 @@ export async function fetchCatalogModels(options: {
     })
     if (!response.ok) return catalogModels()
     const payload = (await response.json()) as Record<string, CatalogEntry>
-    const entry = payload[(catalog as CatalogEntry).id]
-    return entry?.models ? catalogModels(entry) : catalogModels()
+    const entry = payload[options.entryID ?? (catalog as CatalogEntry).id]
+    return entry?.models ? catalogModels(entry) : catalogModels(entry)
   } catch {
     return catalogModels()
   }

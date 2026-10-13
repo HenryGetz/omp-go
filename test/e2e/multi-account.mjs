@@ -99,16 +99,36 @@ try {
   note(second.includes("Logged in to") && second.includes("stub2@example.com"), `account 2 logged in (${second.match(/as [^\n]+/)?.[0] ?? "?"})`)
 
   // 2. Both accounts are stored as separate credentials (omp pools them).
+  // Drop the env bootstrap key for the usage probe: it registers an extra
+  // env-type credential whose report has no email identity, making the account
+  // list nondeterministic.
+  const usageEnv = { ...env }
+  delete usageEnv.OPENCODE_API_KEY
   const usage = execFileSync(
     OMP,
     ["usage", "-p", "opencode-go", "--json", "--extension", path.join(REPO, "src", "index.ts")],
-    { env, encoding: "utf8", timeout: 90_000 },
+    { env: usageEnv, encoding: "utf8", timeout: 90_000 },
   )
-  const parsed = JSON.parse(usage)
-  const goAccounts = [...(parsed.reports ?? []), ...(parsed.accountsWithoutUsage ?? [])].filter(
-    (entry) => entry.provider === "opencode-go",
-  )
-  const emails = [...new Set(goAccounts.map((entry) => entry.email ?? entry.account ?? entry.accountId ?? "?"))]
+  // The first probe right after login can miss an account while credential
+  // leases settle (omp's own background polls fill it in shortly after) —
+  // retry like a real user would see it converge.
+  let parsed = JSON.parse(usage)
+  let goAccounts = []
+  let emails = []
+  for (let attempt = 0; attempt < 4 && (!emails.includes("stub@example.com") || !emails.includes("stub2@example.com")); attempt++) {
+    const body = attempt === 0 ? usage : execFileSync(
+      OMP,
+      ["usage", "-p", "opencode-go", "--json", "--extension", path.join(REPO, "src", "index.ts")],
+      { env: usageEnv, encoding: "utf8", timeout: 90_000 },
+    )
+    parsed = attempt === 0 ? parsed : JSON.parse(body)
+    goAccounts = [...(parsed.reports ?? []), ...(parsed.accountsWithoutUsage ?? [])].filter(
+      (entry) => entry.provider === "opencode-go",
+    )
+    emails = [...new Set(goAccounts.map((entry) => entry.email ?? entry.metadata?.email ?? entry.account ?? entry.accountId ?? entry.metadata?.accountId ?? "?"))]
+    if (emails.includes("stub@example.com") && emails.includes("stub2@example.com")) break
+    await new Promise((resolve) => setTimeout(resolve, 4000))
+  }
   note(emails.length >= 2, `omp usage tracks ${emails.length} opencode-go accounts (quota stacking)`)
   note(
     emails.some((who) => String(who).includes("stub@example.com")) &&
