@@ -86,7 +86,10 @@ function windowLimit(
   }
   return {
     id: descriptor.limitId,
-    label: `${descriptor.label} limit`,
+    // Antigravity's convention: the shared marker rides in the label, and the
+    // scope names the shared group. Go windows are one pool per account,
+    // shared across every session and client of that account.
+    label: `${descriptor.label} limit (shared)`,
     scope: { provider: OPENCODE_GO_PROVIDER, windowId: descriptor.windowId, shared: true },
     window,
     amount,
@@ -137,8 +140,10 @@ export function opencodeGoUsageProvider(options: OpencodeGoUsageOptions): UsageP
             response.status,
           )
         }
-        // Transient: keep the last good report.
-        return null
+        // Transient: serve the last good report rather than null — null reports
+        // the account as "usage unavailable" and double-lists it in `omp usage`
+        // until the next successful poll.
+        return ctx.previousReport ?? null
       }
       const payload = (await response.json().catch(() => undefined)) as { usage?: unknown } | undefined
       if (!payload || typeof payload !== "object" || typeof payload.usage !== "object" || payload.usage === null)
@@ -149,7 +154,21 @@ export function opencodeGoUsageProvider(options: OpencodeGoUsageOptions): UsageP
         const limit = windowLimit(descriptor, windows[descriptor.key])
         return limit ? [limit] : []
       })
-      return { provider: OPENCODE_GO_PROVIDER, fetchedAt: Date.now(), limits, raw: payload }
+      return {
+        provider: OPENCODE_GO_PROVIDER,
+        fetchedAt: Date.now(),
+        limits,
+        // Identity metadata so the usage service can match this report to its
+        // credential — without it the account is listed twice ("no usage data"
+        // alongside its own fresh report).
+        metadata: {
+          accountId: params.credential.accountId,
+          email: params.credential.email,
+          orgId: params.credential.orgId,
+          orgName: params.credential.orgName,
+        },
+        raw: payload,
+      }
     },
   }
 }
