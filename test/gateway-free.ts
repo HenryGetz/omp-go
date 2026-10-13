@@ -8,7 +8,7 @@
 //   bun test/gateway-free.ts
 
 import { spawn } from "node:child_process"
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -40,31 +40,29 @@ if (process.env.EGRESS_CONFIG === "1" && existsSync(egressConfig)) {
 }
 
 const timeoutMs = Number(process.env.FREE_TIMEOUT ?? 90_000)
-const { promise: finished, resolve: settle, reject: fail } = Promise.withResolvers<{ code: number | null; output: string }>()
+const outPath = path.join(home, "omp-output.txt")
+const outFd = openSync(outPath, "w")
+const { promise: finished, resolve: settle } = Promise.withResolvers<number | null>()
 const child = spawn(
   OMP,
   ["run", "--print", "--no-title", "--extension", path.join(REPO, "src", "index.ts"), `--model=${MODEL}`, "Reply with exactly: FREE TIER OK"],
-  { env, cwd: REPO, detached: true },
+  { env, cwd: REPO, detached: true, stdio: ["ignore", outFd, outFd] },
 )
-let output = ""
-child.stdout?.on("data", (chunk) => (output += chunk))
-child.stderr?.on("data", (chunk) => (output += chunk))
 const killer = setTimeout(() => {
-  // Kill the whole process group: omp's service daemon keeps stdio open and
-  // would otherwise outlive the timeout with the pipes pinned.
+  // Group-kill: omp's service daemon outlives the run and would hold pipes.
   try { process.kill(-child.pid!, "SIGKILL") } catch { child.kill("SIGKILL") }
 }, timeoutMs)
-child.on("error", fail)
 child.on("exit", (code) => {
   clearTimeout(killer)
-  settle({ code, output })
+  settle(code)
 })
-const { code, output: result } = await finished
+const code = await finished
+const result = readFileSync(outPath, "utf8")
 console.log(result.trim())
 const ok = code === 0 && result.includes("FREE TIER OK")
 if (!ok) {
   console.error("GATEWAY FAIL: free-tier chat did not complete end to end")
-  console.error(`profile kept at ${home} (omp logs: ${home}/.local/state/omp)`)
+  console.error(`profile kept at ${home} (omp output: ${outPath})`)
   process.exit(1)
 }
 console.log(`GATEWAY OK: ${MODEL} completed keyless against the real free tier`)
