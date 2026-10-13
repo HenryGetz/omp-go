@@ -51,6 +51,10 @@ browser opens, a code appears, tokens rotate themselves. Revolutionary.
   encoding.
 - `bun test/gateway-free.ts` runs real `omp`, no login, `opencode-free/*`
   against the real gateway — the user-visible scenario end to end.
+- `node test/e2e/user-flow.mjs` does the whole thing like a user:
+  `omp plugin install github:HenryGetz/omp-go` into a fresh profile, real `omp`
+  in a terminal (driven by microsoft/tui-test) from a plain directory, chat on
+  `opencode-free/mimo-v2.6-flash-free`, assert the model's actual answer.
 
 ## Fine print
 
