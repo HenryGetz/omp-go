@@ -67,16 +67,17 @@ async function login(accountLabel) {
     await terminal.run(OMP, ["login", "opencode"], { env, cwd: REPO, cols: 140, rows: 42, timeout: 120_000 })
     await terminal.waitExit({ timeout: 90_000 }).catch(() => undefined)
     const raw = (await terminal.getOutput().catch(() => "")) ?? ""
-    return raw.trim() ? raw : await terminal.text({ full: true })
+    const screen = await terminal.text({ full: true }).catch(() => "")
+    return [raw, screen].join("\n")
   } finally {
     await terminal.closeQuiet()
   }
 }
 
-async function chat(label) {
+async function chat(label, model = "mimo-v2.6-pro") {
   const terminal = TuiTest.ephemeral(`omp-go-multi-chat-${label}`)
   try {
-    await terminal.run(OMP, ["run", "--print", "--no-title", "--model=opencode-go/mimo-v2.6-pro", "hi"], {
+    await terminal.run(OMP, ["run", "--print", "--no-title", `--model=opencode-go/${model}`, "hi"], {
       env,
       cwd: REPO,
       cols: 140,
@@ -115,16 +116,31 @@ try {
     `usage windows cover both accounts: ${emails.join(", ")}`,
   )
 
-  // 3. Pool coverage: the usage poller draws every stored credential against
-  // the gateway, so both account tokens must appear at the stub. (Chat turns
-  // cannot be observed here: the model route keeps the catalog base URL, so
-  // only the usage fetcher — which honors the override — reaches the stub.)
+  // 3. Region routing: account 2's workspace is not Global (the stub gates
+  // deepseek for it), so the turn must route around it — omp rotates to a
+  // healthy sibling once the region error is classified as credential-scoped.
+  const gated = await chat("gated", "deepseek-v4.1-flash")
+  // Report-only: omp retries a failing turn on its own schedule (~84s) and
+  // renders the outcome on stderr; the routing guarantees are asserted below
+  // against the stub capture.
+  console.log(`info  region-gated turn output: ${JSON.stringify(gated.trim().slice(-160))}`)
+  const open = await chat("open", "mimo-v2.6-pro")
+  console.log(`info  ungated turn output: ${JSON.stringify(open.trim().slice(-160))}`)
+
+  // 4. Pool coverage + config-driven routing: the Console config pushes the
+  // /inference/go/... endpoint and per-org header, so chats land at the stub
+  // bearing x-opencode-org-id from whichever account served them.
   const requests = existsSync(stubLog)
     ? readFileSync(stubLog, "utf8")
         .split("\n")
         .filter(Boolean)
         .map((line) => JSON.parse(line))
     : []
+  const chats = requests.filter((request) => request.url.includes("chat/completions"))
+  note(
+    chats.length > 0 && chats.every((request) => request.headers["x-opencode-org-id"] !== undefined),
+    `chat requests carry x-opencode-org-id (${chats.length} at stub)`,
+  )
   const usageBearers = [
     ...new Set(
       requests

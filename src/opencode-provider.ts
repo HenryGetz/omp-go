@@ -25,6 +25,9 @@ import {
   type OAuthLoginCallbacks,
   type OAuthProviderInterface,
 } from "@oh-my-pi/pi-ai/registry/oauth"
+import { refreshConsoleConfig } from "./console-config"
+import { writeModelsOverride } from "./models-config"
+import { providerOverride } from "./console-config"
 import {
   CONSOLE_BASE,
   DEFAULT_IDENTITY,
@@ -152,6 +155,23 @@ export class OpencodeOAuthProvider implements OAuthProviderInterface {
         provider: this.id,
       })
 
+    // Warm the Console config mirror before the first request: the harness
+    // fetches /api/v2/config right after connect and merges the pushed headers
+    // and endpoint (x-opencode-org-id, the /inference/go/... base URL).
+    await refreshConsoleConfig({
+      consoleBase: base,
+      token: token.access_token,
+      orgId: org?.id,
+      identity: this.options.identity,
+      fetch: doFetch,
+    })
+    // Keep the models.yml fingerprint block current with this workspace,
+    // including the Console-config endpoint fetched just above.
+    writeModelsOverride({
+      baseURL: providerOverride(org?.id, "opencode-go").baseURL,
+      orgId: org?.id,
+      identity: this.options.identity,
+    })
     return {
       refresh: token.refresh_token,
       access: token.access_token,

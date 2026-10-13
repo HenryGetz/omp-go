@@ -158,19 +158,23 @@ export function sessionHeaders(
 }
 
 /**
- * Headers for a Go-gateway inference request. No `x-org-id` here — device-flow
- * tokens are workspace-bound and the harness omits it on inference.
+ * Headers for a Go-gateway inference request. `x-opencode-org-id` is included
+ * when the serving workspace is known — the harness's Console-driven provider
+ * sends it via pushed config headers. Never `x-org-id` on inference: device
+ * tokens are workspace-bound and the harness omits it here.
  */
 export function inferenceHeaders(
   token: string,
   session: SessionIdentity,
   identity: HarnessIdentity = DEFAULT_IDENTITY,
+  orgId?: string,
 ): Record<string, string> {
   return {
     accept: "*/*",
     authorization: `Bearer ${token}`,
     "content-type": "application/json",
     ...sessionHeaders(session, identity),
+    ...(orgId ? { "x-opencode-org-id": orgId } : {}),
   }
 }
 
@@ -199,6 +203,7 @@ export async function zenChatCompletion(
     session: SessionIdentity
     identity?: HarnessIdentity
     base?: string
+    orgId?: string
     fetch?: typeof fetch
   },
 ): Promise<Response> {
@@ -206,7 +211,7 @@ export async function zenChatCompletion(
   const url = `${(options.base ?? ZEN_GO_BASE).replace(/\/+$/, "")}/chat/completions`
   return f(url, {
     method: "POST",
-    headers: inferenceHeaders(options.token, options.session, options.identity),
+    headers: inferenceHeaders(options.token, options.session, options.identity, options.orgId),
     body: JSON.stringify(chatBody(req)),
   })
 }

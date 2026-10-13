@@ -23,8 +23,11 @@ code appears, tokens rotate themselves. Revolutionary.
   watch the monthly one climb like everyone else. Log in with a second account
   (`/login` again — or `omp login opencode`) and omp pools and load-balances
   across both, ranking by remaining quota. Two accounts, double the cope.
-- **Fingerprint.** Same `User-Agent`, same headers, same bodies. The server
-  cannot tell. That is the entire point of this repo.
+- **Fingerprint.** Same `User-Agent`, same headers, same bodies — enforced on
+  every request path via a managed `models.yml` block (endpoint, `opencode/…`
+  User-Agent, session/project attribution, per-org header) plus golden-trace
+  parity against the real harness. The server cannot tell. That is the entire
+  point of this repo.
 
 ## Proof
 
@@ -33,6 +36,11 @@ the actual opencode binary. 9/9 identical, modulo random ids. The README you
 don't have to trust is in `src/`.
 
 ## Fine print
+
+- Quota and region rules are **per workspace**. If a model says it "requires
+  Global regions", that workspace's Privacy setting is not Global — fix it in
+  the Console or `/logout` that account. Pooling routes around it when a
+  healthy sibling exists.
 
 - Usage route has no golden trace; the harness never calls it. Sued for honesty.
 - Limit windows are account-wide. Share with yourself responsibly.

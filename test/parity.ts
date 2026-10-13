@@ -21,6 +21,7 @@ import { registerCustomApi } from "@oh-my-pi/pi-ai/api-registry"
 import { registerOAuthProvider, getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth"
 import { OpencodeOAuthProvider } from "../src/opencode-provider"
 import { registerOpencodeGo } from "../src/register"
+import { providerOverride } from "../src/console-config"
 import { fetchConsoleConfig, zenChatCompletion, type SessionIdentity } from "../src/wire"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -174,6 +175,9 @@ async function main(): Promise<number> {
     })
     const rotated = await provider.refreshToken(credentials)
     await fetchConsoleConfig(base, { token: rotated.access, orgId: rotated.orgId })
+    // Mirror the wrapper's request assembly: the Console config dictates the
+    // endpoint and pushed headers, the credential supplies the org attribution.
+    const override = providerOverride(rotated.orgId, "opencode-go")
     await zenChatCompletion(
       {
         model: "mimo-v2.6-pro",
@@ -186,7 +190,8 @@ async function main(): Promise<number> {
       },
       {
         token: rotated.access,
-        base: `http://127.0.0.1:${PORT}/zen/go/v1`,
+        base: override.baseURL ?? `http://127.0.0.1:${PORT}/zen/go/v1`,
+        orgId: rotated.orgId,
         session: {
           session: `ses_${"e".repeat(26)}`,
           affinity: `ses_${"e".repeat(26)}`,
@@ -267,14 +272,25 @@ async function main(): Promise<number> {
     const got = readTrace(LOG_PATH)
     const golden = readTrace(GOLDEN_PATH)
 
-    // Golden: [0..7] login+refresh+config from one run, [8] config from the
-    // inference run, [9] harness title-gen call (harness-only), [10] main turn.
+    // Golden: [0..5] login identity flow, [6..8] refresh + two config fetches
+    // (login-time and session-start, order varies), [9] harness title-gen call
+    // (harness-only), [10] main inference turn.
     const pairs: Array<[WireRequest, WireRequest, string]> = [
-      ...Array.from({ length: 8 }, (_, index) => [golden[index], got[index], `request ${index}`] as const),
-      [golden[10], got[8], "request 8 (inference)"],
+      ...Array.from({ length: 6 }, (_, index) => [golden[index], got[index], `request ${index}`] as const),
+      [golden[10], got.find((row) => row.url.includes("chat/completions")) as WireRequest, "request (inference)"],
     ] as Array<[WireRequest, WireRequest, string]>
 
     const problems = [...localProblems, ...fingerprintChecks(got, "omp"), ...fingerprintChecks(golden, "harness")]
+    // The refresh + config segment is order-insensitive (login-time config warm
+    // vs harness's refresh-first ordering); compare as a normalized multiset.
+    const sortedSegment = (rows: WireRequest[]) =>
+      rows.map((row) => JSON.stringify(normalizeRequest(row))).toSorted()
+    diff(
+      sortedSegment(golden.slice(6, 9)),
+      sortedSegment(got.slice(6, 9)),
+      "refresh+config segment",
+      problems,
+    )
     for (const [expected, actual, label] of pairs) {
       if (!expected || !actual) {
         problems.push(`${label}: missing request (golden ${!!expected}, omp ${!!actual})`)

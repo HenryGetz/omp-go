@@ -94,10 +94,42 @@ createServer((req, res) => {
         { id: acct.orgId, name: acct.orgName },
       ])
     }
-    if (req.method === "GET" && p === "/console/api/v2/config")
-      return send(res, 200, { providers: { "opencode-go": {} } })
-    if (req.method === "POST" && p === "/zen/go/v1/chat/completions") {
-      const stream = JSON.parse(body || "{}").stream === true
+    if (req.method === "GET" && p === "/console/api/v2/config") {
+      // Realistic Console config: per-org attribution header + config-driven
+      // inference endpoint, mirroring the live payload shape.
+      const acct = accountFor(tokenAccountNumber(req.headers.authorization))
+      return send(res, 200, {
+        providers: {
+          "opencode-go": {
+            name: `${acct.orgName} / OpenCode Go`,
+            settings: { baseURL: `http://127.0.0.1:${PORT}/inference/go/openai/v1` },
+            headers: { "x-opencode-org-id": acct.orgId },
+            models: {},
+          },
+          opencode: {
+            name: `${acct.orgName} / OpenCode`,
+            settings: { baseURL: `http://127.0.0.1:${PORT}/inference/openai/v1` },
+            headers: { "x-opencode-org-id": acct.orgId },
+            models: {},
+          },
+        },
+      })
+    }
+    if (req.method === "POST" && (p === "/zen/go/v1/chat/completions" || p === "/inference/go/openai/v1/chat/completions")) {
+      const payload = JSON.parse(body || "{}")
+      // Region gate: workspaces of accounts 2+ are not Global; the gateway
+      // refuses Go region-gated models for them (mirrors the live 400).
+      const acct = accountFor(tokenAccountNumber(req.headers.authorization))
+      const org = req.headers["x-opencode-org-id"]
+      if (accountSeq >= 2 && org === accountFor(2).orgId && /deepseek/.test(String(payload.model)))
+        return send(res, 400, {
+          error: {
+            type: "server_error",
+            message:
+              "Upstream request failed: This Go model requires Global regions. Select Global in your workspace's Privacy settings to use it.",
+          },
+        })
+      const stream = payload.stream === true
       if (!stream)
         return send(res, 200, {
           id: "chatcmpl-stub",
