@@ -15,7 +15,7 @@
 import type { AssistantMessageEvent } from "@oh-my-pi/pi-ai"
 // Package root, never a `./utils/*` catch-all path: omp's extension loader
 // only rewrites explicit package exports (same rule as the streamSimple import).
-import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai"
+import { createAssistantMessageEventStream } from "@oh-my-pi/pi-ai"
 
 const REGION_GATE = /requires\s+Global\s+regions|Privacy settings/i
 const ROTATION_STATUS = 403
@@ -52,8 +52,8 @@ function reshape<T>(value: T): T {
  * preserved: events, final result, and failures all forward unchanged apart
  * from the reshaped error payloads.
  */
-export function mapRegionGateErrors(source: AssistantMessageEventStream): AssistantMessageEventStream {
-  const out = new AssistantMessageEventStream()
+export function mapRegionGateErrors(source: ReturnType<typeof createAssistantMessageEventStream>) {
+  const out = createAssistantMessageEventStream()
   void (async () => {
     try {
       for await (const event of source) out.push(reshape(event) as AssistantMessageEvent)

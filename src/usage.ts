@@ -107,7 +107,6 @@ export function opencodeGoUsageProvider(options: OpencodeGoUsageOptions): UsageP
   return {
     id: OPENCODE_GO_PROVIDER,
     validatesCredentials: true,
-    windowDefaults: { primaryMs: 5 * HOUR_MS, secondaryMs: 7 * DAY_MS },
     async fetchUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
       const token =
         params.credential.type === "api_key" ? params.credential.apiKey : params.credential.accessToken

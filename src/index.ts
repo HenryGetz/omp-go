@@ -16,7 +16,7 @@ export default function opencodeAuthExtension(pi: ExtensionAPI): void {
   registerOpencodeGo(pi)
   // Best-effort live session attribution; omp exposes sessionManager through
   // extension event contexts when one is active.
-  pi.on("message.updated", ((_event: unknown, ctx: unknown) => {
+  pi.on("message.updated" as never, ((_event: unknown, ctx: unknown) => {
     const sessionId = (ctx as { sessionManager?: { getSessionId?: () => unknown } } | undefined)?.sessionManager
       ?.getSessionId?.()
     if (typeof sessionId === "string" && sessionId.length > 0) {

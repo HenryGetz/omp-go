@@ -108,6 +108,7 @@ export class OpencodeOAuthProvider implements OAuthProviderInterface {
       })
     callbacks.onAuth({ url: verification.href, instructions: `Enter code: ${device.user_code}` })
 
+    const deviceCode = device.device_code
     // The harness waits `interval` s before the first poll; pi-ai's helper polls
     // immediately, so match the harness cadence here.
     await sleep(device.interval * 1000, callbacks.signal)
@@ -119,7 +120,7 @@ export class OpencodeOAuthProvider implements OAuthProviderInterface {
         const response = await doFetch(`${base}/auth/device/token`, {
           method: "POST",
           headers: consoleHeaders({}, { json: true, identity, trace }),
-          body: JSON.stringify(deviceTokenBody(device.device_code)),
+          body: JSON.stringify(deviceTokenBody(deviceCode)),
           signal,
         })
         // Poll bodies classify regardless of status, matching the harness.
