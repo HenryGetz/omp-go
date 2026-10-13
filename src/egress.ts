@@ -12,15 +12,24 @@
 
 import { spawn, type ChildProcess } from "node:child_process"
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import https from "node:https"
 import net from "node:net"
 import { homedir } from "node:os"
 import path from "node:path"
-import { parseProxyList, type Proxy } from "./proxy"
+import tls from "node:tls"
+import { connectViaProxy, parseProxyList, type Proxy } from "./proxy"
+import { buildRequestHead, readHttpResponse } from "./raw-http"
 
 export type EgressHost = { target: string; enabled: boolean }
 
+function agentHome(): string {
+  // Respect $HOME like every other tool (Bun's homedir() prefers /etc/passwd,
+  // which breaks profile-isolated runs).
+  return process.env.HOME || homedir()
+}
+
 function configFile(): string {
-  return path.join(homedir(), ".omp", "agent", "omp-go-egress.json")
+  return path.join(agentHome(), ".omp", "agent", "omp-go-egress.json")
 }
 
 export function listHosts(): EgressHost[] {
@@ -62,7 +71,7 @@ export function setHostEnabled(target: string, enabled: boolean): EgressHost[] {
   return hosts
 }
 
-type Tunnel = { target: string; port: number; child: ChildProcess }
+type Tunnel = { target: string; port: number; child: ChildProcess; stderr: string; ready: boolean }
 const tunnels = new Map<string, Tunnel>()
 const starting = new Map<string, Promise<void>>()
 
@@ -81,12 +90,23 @@ function stopTunnel(target: string): void {
   const tunnel = tunnels.get(target)
   if (!tunnel) return
   tunnels.delete(target)
-  tunnel.child.kill("SIGTERM")
+  try {
+    process.kill(-tunnel.child.pid!, "SIGTERM")
+  } catch {
+    tunnel.child.kill("SIGTERM")
+  }
+  // ssh configs with ForkAfterAuthentication daemonize: the child pid is a
+  // reaped shell, the listener lives on. Kill by the unique forward port.
+  try {
+    spawn("pkill", ["-f", `ssh -D 127.0.0.1:${tunnel.port}`], { stdio: "ignore" })
+  } catch {
+    // best-effort
+  }
 }
 
 async function ensureTunnel(host: EgressHost): Promise<void> {
   const live = tunnels.get(host.target)
-  if (live && live.child.exitCode === null && live.child.signalCode === null) return
+  if (live?.ready) return
   const inflight = starting.get(host.target)
   if (inflight) return inflight
   const work = (async () => {
@@ -107,21 +127,30 @@ async function ensureTunnel(host: EgressHost): Promise<void> {
         "ServerAliveCountMax=3",
         host.target,
       ],
-      { stdio: "ignore" },
+      // Detached: the tunnel is a daemon child — runtimes reap attached
+      // children (bun does so aggressively), which killed tunnels mid-flight.
+      { stdio: ["ignore", "ignore", "pipe"], detached: true },
     )
     child.on("exit", () => {
-      if (tunnels.get(host.target)?.child === child) tunnels.delete(host.target)
+      // Do NOT drop the record here: ForkAfterAuthentication configs make the
+      // spawned child exit 0 while the listener lives on. The readiness loop
+      // (port truth) owns the record's fate.
+      const tail = record.stderr.trim()
+      if (tail) lastErrors.set(host.target, tail)
     })
-    tunnels.set(host.target, { target: host.target, port, child })
+    tunnels.set(host.target, { target: host.target, port, child, stderr: "", ready: false })
+    const record = tunnels.get(host.target)!
+    child.stderr?.on("data", (chunk) => {
+      record.stderr = `${record.stderr}${chunk}`.slice(-2000)
+    })
     // Wait until the SOCKS port actually accepts connections (bounded): ssh
     // takes a moment to establish, and connecting early fails the request over
     // to direct egress.
+    // The PORT is the truth, not the process: ssh configs with
+    // ForkAfterAuthentication make the spawned child exit 0 immediately while
+    // the forwarded listener lives on.
     const deadline = Date.now() + 10_000
     for (;;) {
-      if (child.exitCode !== null) {
-        tunnels.delete(host.target)
-        return
-      }
       const ready = await new Promise<boolean>((done) => {
         const probe = net.connect(port, "127.0.0.1")
         probe.once("connect", () => {
@@ -130,7 +159,10 @@ async function ensureTunnel(host: EgressHost): Promise<void> {
         })
         probe.once("error", () => done(false))
       })
-      if (ready) return
+      if (ready) {
+        record.ready = true
+        return
+      }
       if (Date.now() > deadline) {
         stopTunnel(host.target)
         return
@@ -142,12 +174,125 @@ async function ensureTunnel(host: EgressHost): Promise<void> {
   return work
 }
 
+const lastErrors = new Map<string, string>()
+
+/** Last lines of ssh's stderr for a host — the "why is this down" answer. */
+export function tunnelError(target: string): string | undefined {
+  const tunnel = tunnels.get(target)
+  const text = (tunnel?.stderr.trim() || lastErrors.get(target) || "").trim()
+  return text ? text.split("\n").slice(-3).join(" ") : undefined
+}
+
+/** The proxy for one host's live tunnel (spawning it if needed). */
+export async function proxyFor(target: string): Promise<Proxy | undefined> {
+  const host = listHosts().find((entry) => entry.target === target)
+  if (!host) return undefined
+  if (host.enabled) await ensureTunnel(host)
+  const status = tunnelStatus().find((entry) => entry.target === target)
+  return status?.tunnel && status.port !== undefined ? parseProxyList(`socks5://127.0.0.1:${status.port}`)[0] : undefined
+}
+
+/** GET an IP echo through `proxy` (or direct) — the egress address onboarding reports. */
+export async function probeEgressIP(proxy?: Proxy): Promise<string> {
+  if (!proxy) {
+    const { promise, resolve, reject } = Promise.withResolvers<string>()
+    const req = https.request(
+      { host: "api.ipify.org", path: "/", method: "GET", headers: { host: "api.ipify.org", "user-agent": "omp-go-egress/1" } },
+      (res) => {
+        let body = ""
+        res.on("data", (chunk) => (body += chunk))
+        res.on("end", () => resolve(body.trim()))
+      },
+    )
+    req.on("error", reject)
+    req.end()
+    return promise
+  }
+  // Proxied: hand request over the tunnel socket (node's client dials its own
+  // connection and would silently bypass the tunnel).
+  const tunnel = await connectViaProxy(proxy, "api.ipify.org", 443)
+  const socket = tls.connect({ socket: tunnel, servername: "api.ipify.org" })
+  await new Promise<void>((done) => socket.once("secureConnect", () => done()))
+  socket.write(buildRequestHead("GET", "/", { host: "api.ipify.org", "user-agent": "omp-go-egress/1" }))
+  const response = await readHttpResponse(socket)
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let body = ""
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    body += decoder.decode(value)
+  }
+  socket.destroy()
+  return body.trim()
+}
+
+/** `Host` aliases from ~/.ssh/config — what /egress add offers to complete. */
+export function sshConfigHosts(): string[] {
+  try {
+    const text = readFileSync(path.join(agentHome(), ".ssh", "config"), "utf8")
+    return [...text.matchAll(/^\s*Host\s+(.+)$/gim)]
+      .flatMap((match) => match[1].split(/\s+/))
+      .filter((name) => name && !/[*?!]/.test(name))
+  } catch {
+    return []
+  }
+}
+
+/**
+ * The add flow shared by the /egress wizard and `omp --egress-add`: persist the
+ * host, bring the tunnel up, and report what budget it adds. Returns the
+ * message text so each surface can render it its own way.
+ */
+export async function addEgressFlow(target: string): Promise<{ message: string; ok: boolean }> {
+  addHost(target)
+  try {
+    const proxy = await proxyFor(target)
+    if (!proxy) {
+      return {
+        ok: false,
+        message:
+          `added ${target}, but the tunnel is not up yet — ${tunnelError(target) ?? "ssh did not connect"}.\n` +
+          `If it is an auth error: ssh-copy-id ${target}`,
+      }
+    }
+    const [ip, localIP] = await Promise.all([probeEgressIP(proxy), probeEgressIP()])
+    const distinct = ip !== localIP
+    return {
+      ok: distinct,
+      message: distinct
+        ? `added ${target} — egress ${ip} (distinct from this machine's ${localIP})\nfree-tier traffic will rotate across it automatically`
+        : `added ${target} — but it egresses via ${ip}, same as this machine.\nNo extra budget gained; still routed if you want it.`,
+    }
+  } catch (error) {
+    return { ok: false, message: `added ${target}, but probing failed: ${error instanceof Error ? error.message : String(error)}` }
+  }
+}
+
+/** The health check shared by `/egress test` and `omp --egress-test`. */
+export async function testEgressFlow(): Promise<string> {
+  const lines: string[] = []
+  for (const host of tunnelStatus()) {
+    if (!host.enabled) {
+      lines.push(`off   ${host.target}`)
+      continue
+    }
+    try {
+      const proxy = await proxyFor(host.target)
+      if (!proxy) throw new Error(tunnelError(host.target) ?? "tunnel down")
+      lines.push(`UP    ${host.target} — egress ${await probeEgressIP(proxy)}`)
+    } catch (error) {
+      lines.push(`DOWN  ${host.target} — ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  return lines.join("\n") || "no egress hosts configured"
+}
+
 /** Live tunnel state for `/egress` listings. */
 export function tunnelStatus(): Array<EgressHost & { tunnel: boolean; port?: number }> {
   return listHosts().map((host) => {
     const tunnel = tunnels.get(host.target)
-    const live = tunnel !== undefined && tunnel.child.exitCode === null && tunnel.child.signalCode === null
-    return { ...host, tunnel: live, port: tunnel?.port }
+    return { ...host, tunnel: tunnel?.ready === true, port: tunnel?.port }
   })
 }
 

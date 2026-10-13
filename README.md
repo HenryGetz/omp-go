@@ -1,6 +1,7 @@
 # omp-go
 
-OpenCode, inside Oh My Pi. Two providers, one fingerprint:
+OpenCode, inside Oh My Pi. Two providers, one fingerprint, and — because the
+free tier meters per endpoint — potentially every public IP you own.
 
 - **opencode-go** — your Go subscription: OAuth login, the 31 live Go models,
   the 5h/weekly/monthly limit windows.
@@ -8,6 +9,9 @@ OpenCode, inside Oh My Pi. Two providers, one fingerprint:
   authenticated as `Bearer public`, exactly like the harness when you're not
   logged in. No `sk-` key (opencode stopped issuing those), no login, no
   payment details, no nothing.
+- **/egress** — route the free traffic through your own machines over SSH
+  tunnels the plugin opens and babysits for you. Per-endpoint metering means
+  every box you own is its own free budget; collect the whole set.
 
 Traffic is shaped exactly like the opencode harness on every request path.
 Apparently we live in a world where that matters.
@@ -22,6 +26,40 @@ Restart. Free models work immediately (`/model opencode-free/mimo-v2.6-flash-fre
 For the Go subscription: `/login` → "OpenCode Console (Go subscription)". A
 browser opens, a code appears, tokens rotate themselves. Revolutionary.
 
+## Your machines, your egresses
+
+The free tier hands out quota per endpoint, which is very fair of them and also
+very exploitable by anyone who owns more than one computer. If that's you:
+
+```
+/egress
+```
+
+…and the plugin does the onboarding:
+
+1. No hosts yet? It **asks for an SSH target right there in the TUI**. Paste
+   `student@100.125.193.75`, hit enter, done.
+2. It **checks the host immediately** — opens the `ssh -D` tunnel (key auth,
+   BatchMode; it's your machine, you already have the key), and reports the
+   egress IP it will use: `added student@100.125.193.75 — egress 198.174.0.110`.
+3. If the new box exits through the same IP as the one you're sitting at, it
+   says so instead of pretending you gained a budget. If SSH fails, you get
+   the actual error and the fix (`ssh-copy-id student@…`), not a shrug.
+
+Then it just works: free-tier requests round-robin across every live tunnel
+plus your direct connection. A tunnel that dies drops out of rotation and
+revives itself; `/egress off <host>` pauses one without deleting it,
+`/egress test` re-checks every host and prints egress IPs, `/egress remove`
+buries it. Tab-completion offers your `~/.ssh/config` hosts, because typing
+hostnames is not a skill anyone should need to exercise here.
+
+Prefer DIY? `OMP_GO_PROXIES="socks5://127.0.0.1:1081,http://10.0.0.2:8080"`
+pins an explicit pool (SOCKS5 or HTTP CONNECT — bare `ssh -D` tunnels work
+fine). Hosts live in `~/.omp/agent/omp-go-egress.json`.
+
+The devs are aware of and fine with multi-machine use. They said nice things.
+Keep the written OK somewhere safe.
+
 ## What it does
 
 - **Login.** The real device flow, byte-for-byte the one `opencode auth login`
@@ -33,36 +71,15 @@ browser opens, a code appears, tokens rotate themselves. Revolutionary.
   agent conversation, and this plugin speaks both natively.
 - **Limits.** `omp usage` shows the 5h / weekly / monthly windows, so you can
   watch the monthly one climb like everyone else. Log in with a second account
-  (`/login` again — or `omp login opencode`) and omp pools and load-balances
-  across both, ranking by remaining quota. Two accounts, double the cope.
+  (`/login` again — or `omp login opencode-free`) and omp pools and
+  load-balances across both, ranking by remaining quota. Two accounts, double
+  the cope. Combine with three egresses and you're basically a small
+  datacenter of one.
 - **Fingerprint.** Same `User-Agent`, same header order and casing, same
   bodies, same session/trace id scheme. `src/ordered-fetch.ts` writes the
   request head byte-for-byte as the harness does (`node:https`, `setHost:
   false`), because bun's fetch sorts headers and the free-tier gateway checks.
   Golden-trace parity against the real harness enforces the rest.
-
-## More free usage: your own machines as egresses
-
-The free tier meters per endpoint, so every public IP you own is its own
-budget. This plugin will spread free-tier traffic across your machines over
-SSH tunnels it manages itself:
-
-```
-/egress add student@100.125.193.75    # e.g. the school box
-/egress add wrcadmin@100.93.105.17    # e.g. the home box
-/egress                               # list + live tunnel status
-```
-
-That's the whole setup. On the next request the plugin opens an `ssh -D`
-tunnel per host (key auth — they're your machines) and round-robins free-tier
-traffic across them plus your local connection; a dead tunnel drops out and
-comes back on its own. `/egress off <host>` pauses one without removing it.
-
-- `OMP_GO_PROXIES="socks5://127.0.0.1:1081,http://10.0.0.2:8080"` pins an
-  explicit pool instead (SOCKS5 or HTTP CONNECT — e.g. bare `ssh -D` tunnels).
-- Hosts live in `~/.omp/agent/omp-go-egress.json`.
-- The devs know about and are fine with multi-machine use; keep your written
-  OK somewhere safe.
 
 ## Proof
 
@@ -72,14 +89,18 @@ comes back on its own. `/egress off <host>` pauses one without removing it.
 - `bun test/transport.ts` pins the wire contract the free-tier gateway
   validates: header order/casing and the harness's descending session-id
   encoding.
-- `bun test/gateway-free.ts` runs real `omp`, no login, `opencode-free/*`
-  against the real gateway — the user-visible scenario end to end.
 - `bun test/proxy.ts` pins the egress pool: proxy parsing, round-robin
   failover, and the SOCKS5 tunnel handshake.
-- `node test/e2e/user-flow.mjs` does the whole thing like a user:
+- `bun test/gateway-free.ts` runs real `omp`, no login, `opencode-free/*`
+  against the real gateway — the user-visible scenario end to end. With
+  `EGRESS_CONFIG=1` it also proves the plugin opens its own tunnels from the
+  host list.
+- `bun test/e2e/user-flow.mjs` does the whole thing like a user:
   `omp plugin install github:HenryGetz/omp-go` into a fresh profile, real `omp`
   in a terminal (driven by microsoft/tui-test) from a plain directory, chat on
   `opencode-free/mimo-v2.6-flash-free`, assert the model's actual answer.
+- `bun test/e2e/egress-onboarding.mjs` drives the `/egress` onboarding itself
+  under microsoft/tui-test: the dialog, the add, the egress-IP report.
 
 ## Fine print
 
@@ -89,6 +110,10 @@ comes back on its own. `/egress off <host>` pauses one without removing it.
 - Model-discovery GETs (`/models`) still carry omp's own User-Agent — omp's
   catalog fetcher owns those. Inference, login, config, and usage are
   fingerprinted.
+- Egress tunnels are plain `ssh -D` to hosts you control, with key auth. If
+  one of your boxes is behind a captive portal, `/egress test` will tell you
+  and rotation will simply skip it. This is load spreading across your own
+  machines, not an anonymizer — everyone's still you.
 - Quota and region rules are **per workspace**. If a model says it "requires
   Global regions", that workspace's Privacy setting is not Global — fix it in
   the Console or `/logout` that account. Pooling routes around it when a

@@ -4,6 +4,7 @@
 import assert from "node:assert/strict"
 import net from "node:net"
 import { connectViaProxy, markProxyFailure, nextProxy, parseProxy, parseProxyList, resetProxyHealth } from "../src/proxy"
+import { buildRequestHead, readHttpResponse } from "../src/raw-http"
 
 // parse
 const socks = parseProxy("socks5://user:pass@127.0.0.1:1081")
@@ -67,4 +68,40 @@ assert.equal(nextProxy([]), undefined, "no proxies configured -> direct")
   }
 }
 
-console.log("PROXY OK: parsing, round-robin failover, and SOCKS5 tunneling pinned")
+// raw HTTP/1.1 response parser (bypasses node's client, which dials its own
+// connection and would bypass tunnels)
+{
+  const { promise, resolve } = Promise.withResolvers<number>()
+  const server = net.createServer((socket) => {
+    socket.once("data", () => {
+      socket.write(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ntransfer-encoding: chunked\r\n\r\n" +
+          "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
+      )
+    })
+  })
+  server.listen(0, "127.0.0.1", () => resolve((server.address() as net.AddressInfo).port))
+  const port = await promise
+  try {
+    const socket = net.connect(port, "127.0.0.1")
+    await new Promise((done) => socket.once("connect", () => done(undefined)))
+    socket.write(buildRequestHead("GET", "/x", { host: "127.0.0.1" }))
+    const res = await readHttpResponse(socket)
+    assert.equal(res.status, 200)
+    assert.equal(res.headers["content-type"], "text/plain")
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let body = ""
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      body += decoder.decode(value)
+    }
+    assert.equal(body, "hello world", "chunked response body reassembles")
+    socket.destroy()
+  } finally {
+    server.close()
+  }
+}
+
+console.log("PROXY OK: parsing, round-robin failover, SOCKS5 tunneling, and raw HTTP pinned")

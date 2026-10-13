@@ -5,7 +5,17 @@
 
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types"
 import { registerOpencodeGo, sessionIdentity } from "./register"
-import { addHost, listHosts, removeHost, setHostEnabled, tunnelStatus } from "./egress"
+import {
+  addEgressFlow,
+  addHost,
+  listHosts,
+  removeHost,
+  setHostEnabled,
+  sshConfigHosts,
+  testEgressFlow,
+  tunnelError,
+  tunnelStatus,
+} from "./egress"
 
 export * from "./wire"
 export * from "./opencode-provider"
@@ -16,26 +26,51 @@ export * from "./register"
 export default function opencodeAuthExtension(pi: ExtensionAPI): void {
   registerOpencodeGo(pi)
   pi.registerCommand("egress", {
-    description: "Manage free-tier egress hosts (ssh tunnels) — /egress [list|add <ssh-target>|remove <ssh-target>|on|off <ssh-target>]",
-    getArgumentCompletions: (prefix) =>
-      ["list", "add", "remove", "on", "off"].filter((word) => word.startsWith(prefix)).map((word) => ({ value: word, label: word })),
+    description:
+      "Route free-tier traffic through your own machines — /egress [add <ssh-target>|remove <ssh-target>|on|off <ssh-target>|test|list]",
+    getArgumentCompletions: (prefix) => {
+      const words = ["list", "add", "remove", "on", "off", "test"]
+      const targets = [...new Set([...listHosts().map((h) => h.target), ...sshConfigHosts()])]
+      const args = prefix.split(/\s+/)
+      const options = args.length > 1 ? targets : [...words, ...targets]
+      const last = args[args.length - 1] ?? ""
+      return options.filter((value) => value.startsWith(last)).map((value) => ({ value, label: value }))
+    },
     handler: async (args, ctx) => {
       const [verb = "list", ...rest] = args.trim().split(/\s+/)
       const target = rest.join(" ")
       const describe = () =>
         tunnelStatus()
-          .map((host) => `${host.enabled ? (host.tunnel ? "UP  " : "DOWN") : "off "} ${host.target}${host.port ? ` (127.0.0.1:${host.port})` : ""}`)
+          .map(
+            (host) =>
+              `${host.enabled ? (host.tunnel ? "UP  " : "DOWN") : "off "} ${host.target}${host.port ? ` (127.0.0.1:${host.port})` : ""}${
+                host.enabled && !host.tunnel ? ` — ${tunnelError(host.target) ?? "not connected"}` : ""
+              }`,
+          )
           .join("\n") || "no egress hosts configured"
+
+      const addFlow = async (input: string) => {
+        const { message, ok } = await addEgressFlow(input)
+        ctx.ui.notify(message, ok ? "info" : "warning")
+      }
+
       switch (verb) {
         case "list":
         case "":
+          if (listHosts().length === 0) {
+            const input = await ctx.ui.input("SSH target to route free-tier traffic through", "user@host")
+            if (input?.trim()) await addFlow(input.trim())
+            else ctx.ui.notify("no egress hosts configured — /egress add user@host whenever", "info")
+            return
+          }
           ctx.ui.notify(`egress hosts:\n${describe()}`, "info")
           break
-        case "add":
-          if (!target) return ctx.ui.notify("usage: /egress add <ssh-target> (e.g. student@100.125.193.75)", "warning")
-          addHost(target)
-          ctx.ui.notify(`added ${target}; tunnel opens on the next request\n${describe()}`, "info")
+        case "add": {
+          const input = target || (await ctx.ui.input("SSH target to route free-tier traffic through", "user@host"))
+          if (!input?.trim()) return ctx.ui.notify("usage: /egress add <ssh-target> (e.g. student@100.125.193.75)", "warning")
+          await addFlow(input.trim())
           break
+        }
         case "remove":
         case "rm":
           if (!target) return ctx.ui.notify("usage: /egress remove <ssh-target>", "warning")
@@ -48,10 +83,14 @@ export default function opencodeAuthExtension(pi: ExtensionAPI): void {
           setHostEnabled(target, verb === "on")
           ctx.ui.notify(`${verb === "on" ? "enabled" : "disabled"} ${target}\n${describe()}`, "info")
           break
+        case "test": {
+          ctx.ui.notify("probing egress hosts…", "info")
+          ctx.ui.notify(await testEgressFlow(), "info")
+          break
+        }
         default:
-          ctx.ui.notify(`unknown subcommand '${verb}' — try list/add/remove/on/off`, "warning")
+          ctx.ui.notify(`unknown subcommand '${verb}' — try list/add/remove/on/off/test`, "warning")
       }
-      if (listHosts().length === 0 && verb === "list") ctx.ui.notify("tip: /egress add student@100.125.193.75", "info")
     },
   })
   // Best-effort live session attribution; omp exposes sessionManager through

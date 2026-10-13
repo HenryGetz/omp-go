@@ -30,6 +30,7 @@ import type { Transform } from "node:stream"
 import { DEFAULT_IDENTITY, projectID, sessionID, userAgent } from "./wire"
 import { connectViaProxy, markProxyFailure, nextProxy, type Proxy } from "./proxy"
 import { egressProxies } from "./egress"
+import { buildRequestHead, readHttpResponse } from "./raw-http"
 
 // [lookup name, wire name] — the harness's header casing is part of the
 // fingerprint; node writes keys verbatim, so casing must be restored here.
@@ -202,6 +203,25 @@ export async function harnessFetch(input: RequestInfo | URL, init?: RequestInit)
 
   void (async () => {
     const { socket } = await openTunnel()
+    if (socket) {
+      // Proxied: write the hand-built head over the tunnel socket and parse the
+      // response ourselves — node's client ignores createConnection and dials
+      // its own (direct) connection.
+      await new Promise<void>((done) => (secure ? socket.once("secureConnect", () => done()) : done()))
+      socket.write(buildRequestHead(method, url.pathname + url.search, ordered))
+      if (body) socket.write(body)
+      const res = await readHttpResponse(socket)
+      const decompressor = decode((res.headers["content-encoding"] as string) ?? undefined)
+      const headers = new Headers()
+      for (const [name, value] of Object.entries(res.headers)) {
+        if (name === "content-encoding") continue
+        if (Array.isArray(value)) for (const v of value) headers.append(name, v)
+        else headers.set(name, value)
+      }
+      const source = decompressor ? Readable.fromWeb(res.body as never).pipe(decompressor) : Readable.fromWeb(res.body as never)
+      resolve(new Response(Readable.toWeb(source) as ReadableStream<Uint8Array>, { status: res.status, statusText: res.statusText, headers }))
+      return
+    }
     const options: https.RequestOptions = {
       host: url.hostname,
       port: url.port || (secure ? 443 : 80),
@@ -209,9 +229,8 @@ export async function harnessFetch(input: RequestInfo | URL, init?: RequestInit)
       method,
       headers: ordered,
       setHost: false,
-      ...(socket
-        ? { createConnection: () => socket as never, agent: false as never }
-        : { agent: secure ? agent : undefined, servername: secure ? url.hostname : undefined }),
+      agent: secure ? agent : undefined,
+      servername: secure ? url.hostname : undefined,
     }
     respond(requestFn(options))
   })().catch(reject)
