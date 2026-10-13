@@ -35,6 +35,7 @@ import { OpencodeOAuthProvider } from "./opencode-provider"
 import { catalogModels, fetchCatalogModels } from "./models"
 import { OPENCODE_GO_PROVIDER, opencodeGoUsageProvider } from "./usage"
 import {
+  CONSOLE_BASE,
   DEFAULT_IDENTITY,
   projectID,
   sessionHeaders,
