@@ -45,6 +45,15 @@ const HARNESS_COMPAT = {
   reasoningContentField: "reasoning_content",
 } as const
 
+/**
+ * The free lane's body carries no `store` (golden capture: the harness sends
+ * only model/messages/stream/stream_options[/tools/max_completion_tokens]).
+ */
+const FREE_COMPAT = {
+  ...HARNESS_COMPAT,
+  supportsStore: false,
+} as const
+
 export function toProviderModel(id: string, model: CatalogModel): ProviderModelConfig {
   const input = (model.modalities?.input ?? ["text"]).filter(
     (modality): modality is "text" | "image" => modality === "text" || modality === "image",
@@ -66,7 +75,7 @@ export function toProviderModel(id: string, model: CatalogModel): ProviderModelC
   }
 }
 
-export const ZEN_CATALOG = zenCatalog as CatalogEntry
+export const OPENCODE_CATALOG = zenCatalog as CatalogEntry
 
 export function catalogModels(entry: CatalogEntry = catalog as CatalogEntry): ProviderModelConfig[] {
   // The harness hides deprecated catalog models ("Model unavailable"); mirror
@@ -74,6 +83,43 @@ export function catalogModels(entry: CatalogEntry = catalog as CatalogEntry): Pr
   return Object.entries(entry.models)
     .filter(([, model]) => model.status !== "deprecated")
     .map(([id, model]) => toProviderModel(id, model))
+}
+
+/** Harness free-tier rule: no cost tier charges for input (`OpencodePlugin`). */
+function isFree(model: CatalogModel): boolean {
+  const tiers = Array.isArray(model.cost) ? model.cost : [model.cost]
+  return !tiers.some((tier) => Number(tier?.input ?? 0) > 0)
+}
+
+/**
+ * The free tier: exactly the catalog models the harness enables without a key —
+ * zero-cost and not deprecated. Under a key the harness shows the paid set on
+ * the same provider; omp keeps them separate (`opencode-free` vs `opencode-go`)
+ * so the free path can never demand a key.
+ */
+export function freeModels(entry: CatalogEntry = OPENCODE_CATALOG): ProviderModelConfig[] {
+  return Object.entries(entry.models)
+    .filter(([, model]) => model.status !== "deprecated" && isFree(model))
+    .map(([id, model]) => ({ ...toProviderModel(id, model), compat: FREE_COMPAT }))
+}
+
+/** Live refresh of the free set (same catalog fetch, same free/deprecated rules). */
+export async function fetchFreeModels(options: {
+  session: SessionIdentity
+  identity?: HarnessIdentity
+  fetch?: typeof fetch
+}): Promise<ProviderModelConfig[]> {
+  try {
+    const response = await (options.fetch ?? fetch)(CATALOG_URL, {
+      headers: sessionHeaders(options.session, options.identity ?? DEFAULT_IDENTITY),
+    })
+    if (!response.ok) return freeModels()
+    const payload = (await response.json()) as Record<string, CatalogEntry>
+    const entry = payload[(OPENCODE_CATALOG as CatalogEntry).id]
+    return entry?.models ? freeModels(entry) : freeModels()
+  } catch {
+    return freeModels()
+  }
 }
 
 /**

@@ -31,7 +31,7 @@ const env = {
   XDG_STATE_HOME: path.join(home, ".local", "state"),
   XDG_CACHE_HOME: path.join(home, ".cache"),
   OMP_GO_CONSOLE: `${STUB_URL}/console`,
-  OMP_GO_ZEN: `${STUB_URL}/zen/go/v1`,
+  OMP_GO_BASE: `${STUB_URL}/zen/go/v1`,
 }
 delete env.OPENCODE_API_KEY
 
@@ -64,7 +64,7 @@ const note = (ok, message) => {
 async function login(accountLabel) {
   const terminal = TuiTest.ephemeral(`omp-go-multi-login-${accountLabel}`)
   try {
-    await terminal.run(OMP, ["login", "opencode"], { env, cwd: REPO, cols: 140, rows: 42, timeout: 120_000 })
+    await terminal.run(OMP, ["login", "opencode-free"], { env, cwd: REPO, cols: 140, rows: 42, timeout: 120_000 })
     await terminal.waitExit({ timeout: 90_000 }).catch(() => undefined)
     const raw = (await terminal.getOutput().catch(() => "")) ?? ""
     const screen = await terminal.text({ full: true }).catch(() => "")

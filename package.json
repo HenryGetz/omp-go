@@ -1,7 +1,7 @@
 {
   "name": "omp-go",
-  "version": "0.7.0",
-  "description": "OpenCode Go subscription for Oh My Pi: native OAuth login, all 36 Go models, and usage limits \u2014 wire-identical to the opencode harness.",
+  "version": "0.8.0",
+  "description": "OpenCode for Oh My Pi: the Go subscription and OpenCode's free tier (keyless) \u2014 wire-identical to the opencode harness.",
   "type": "module",
   "main": "./src/index.ts",
   "omp": {
@@ -23,10 +23,12 @@
     "plugin",
     "opencode",
     "opencode-go",
-    "oauth"
+    "opencode-free",
+    "oauth",
+    "free-tier"
   ],
   "scripts": {
-    "test": "bun test/parity.ts",
+    "test": "bun test/parity.ts && bun test/transport.ts",
     "typecheck": "tsc --noEmit"
   }
 }

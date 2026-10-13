@@ -22,7 +22,7 @@ import { registerOAuthProvider, getOAuthProviders } from "@oh-my-pi/pi-ai/regist
 import { OpencodeOAuthProvider } from "../src/opencode-provider"
 import { registerOpencodeGo } from "../src/register"
 import { providerOverride } from "../src/console-config"
-import { fetchConsoleConfig, zenChatCompletion, zenChatCompletion as freeChat, type SessionIdentity } from "../src/wire"
+import { fetchConsoleConfig, opencodeChatCompletion, opencodeChatCompletion as freeChat, type SessionIdentity } from "../src/wire"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO = path.resolve(HERE, "..")
@@ -257,7 +257,7 @@ async function main(): Promise<number> {
     } as unknown as ExtensionAPI
     registerOpencodeGo(fakePi)
     const config = registered.get("opencode-go")
-    const loginConfig = registered.get("opencode")
+    const freeConfig = registered.get("opencode-free")
     const localProblems: string[] = []
     if (!config) localProblems.push("registerProvider got no opencode-go config")
     if (config && config.baseUrl !== "https://opencode.ai/zen/go/v1")
@@ -277,14 +277,26 @@ async function main(): Promise<number> {
     if (mimo && mimo.reasoning !== true) localProblems.push("mimo reasoning flag lost")
     if (!config?.usage || !config?.fetchDynamicModels)
       localProblems.push("config missing usage/fetchDynamicModels")
-    const listed = getOAuthProviders().find((entry) => entry.id === "opencode")
-    if (!listed) localProblems.push("auth-broker listing missing 'opencode' login")
+    const listed = getOAuthProviders().find((entry) => entry.id === "opencode-free")
+    if (!listed) localProblems.push("auth-broker listing missing 'opencode-free' login")
     if (listed && listed.storeCredentialsAs !== "opencode-go")
       localProblems.push(`login stores as ${listed.storeCredentialsAs} != opencode-go`)
-    const loginOauth = loginConfig?.oauth as { storeCredentialsAs?: string } | undefined
-    if (!loginOauth) localProblems.push("login-only registerProvider call missing oauth")
-    if (loginOauth && loginOauth.storeCredentialsAs !== "opencode-go")
-      localProblems.push(`login oauth storeCredentialsAs ${loginOauth.storeCredentialsAs} != opencode-go`)
+    const freeOauth = freeConfig?.oauth as { storeCredentialsAs?: string } | undefined
+    if (!freeConfig) localProblems.push("registerProvider got no opencode-free config")
+    if (freeConfig && freeConfig.apiKey !== "public")
+      localProblems.push(`opencode-free apiKey ${freeConfig.apiKey} != public (keyless free tier)`)
+    if (freeConfig && freeConfig.baseUrl !== "https://opencode.ai/inference/v1")
+      localProblems.push(`opencode-free baseUrl ${freeConfig.baseUrl} != https://opencode.ai/inference/v1`)
+    const freeIds = new Set((freeConfig?.models ?? []).map((model) => model.id))
+    if (freeIds.size === 0) localProblems.push("opencode-free registers no models")
+    for (const id of freeIds) {
+      const cost = (catalogJson as { models: Record<string, { cost?: { input?: number } | Array<{ input?: number }> }> }).models[id]
+      const tiers = Array.isArray(cost?.cost) ? cost.cost : [cost?.cost]
+      if (tiers.some((tier) => Number(tier?.input ?? 0) > 0))
+        localProblems.push(`opencode-free includes paid model ${id} (harness free tier is zero-cost only)`)
+    }
+    if (freeOauth && freeOauth.storeCredentialsAs !== "opencode-go")
+      localProblems.push(`free oauth storeCredentialsAs ${freeOauth.storeCredentialsAs} != opencode-go`)
 
     const report = config?.usage
       ? await config.usage.fetchUsage(

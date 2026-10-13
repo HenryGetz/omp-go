@@ -34,13 +34,11 @@ import {
 const BEGIN = "# >>> omp-go managed block (do not edit) >>>"
 const END = "# <<< omp-go managed block <<<"
 const HARNESS_BODY_COMPAT = ["supportsReasoningEffort: false", "supportsStore: true"]
-const ZEN_BODY_COMPAT = ["supportsReasoningEffort: false", "supportsStore: false"]
+const FREE_BODY_COMPAT = ["supportsReasoningEffort: false", "supportsStore: false"]
 const PROVIDERS = [
   { id: "opencode-go", fallbackURL: ZEN_GO_BASE, freeTier: false, compat: HARNESS_BODY_COMPAT },
-  // The free tier serves both id spellings (models.dev `opencode`, runtime
-  // alias `opencode-zen`); key both so the override lands either way.
-  { id: "opencode", fallbackURL: ZEN_BASE, freeTier: true, compat: ZEN_BODY_COMPAT },
-  { id: "opencode-zen", fallbackURL: ZEN_BASE, freeTier: true, compat: ZEN_BODY_COMPAT },
+  // The free tier: zero-cost catalog models, keyless (`Bearer public`).
+  { id: "opencode-free", fallbackURL: ZEN_BASE, freeTier: true, compat: FREE_BODY_COMPAT },
 ] as const
 
 function modelsFile(): string {
@@ -81,6 +79,9 @@ export function writeModelsOverride(input: { orgId?: string; identity?: HarnessI
       // The harness's unauthenticated free-tier key (OpencodePlugin sets
       // `apiKey: "public"` when no credential is present); the gateway accepts
       // it with the harness fingerprint, and a /login credential wins anyway.
+      // The fingerprint itself (header order + session ids) is stamped at the
+      // transport layer by src/ordered-fetch.ts; these values cover the
+      // non-stream paths.
       ...(freeTier ? [`    apiKey: "public"`] : []),
       `    compat:`,
       ...compat.map((line) => `      ${line}`),

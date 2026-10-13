@@ -1,8 +1,9 @@
-// omp-native registration for the OpenCode subscriptions: two providers share
-// one wire fingerprint and one Console login.
+// omp-native registration for OpenCode's model lanes: two providers share one
+// wire fingerprint and one Console login.
 //
-//   opencode-go — the Go subscription catalog (36 models, /zen/go/v1)
-//   opencode    — OpenCode Zen incl. all 37 free-tier models (inference/v1)
+//   opencode-go   — the Go subscription catalog (36 models, /zen/go/v1)
+//   opencode-free — OpenCode's free tier: only the zero-cost catalog models
+//                   (inference/v1), keyless via the harness's `Bearer public`
 //
 // Everything routed through these providers leaves omp shaped like the opencode
 // harness: `streamSimple` injects the harness fingerprint (User-Agent,
@@ -28,12 +29,13 @@ import type {
 // resolve it and the extension fails to load ("Cannot find package
 // '@oh-my-pi/pi-ai'"). The root re-exports `streamSimple` (`export * from "./stream"`).
 import { streamSimple } from "@oh-my-pi/pi-ai"
+import { harnessFetch } from "./ordered-fetch"
 import type { Api, Model, SimpleStreamOptions, Context, AssistantMessageEventStream } from "@oh-my-pi/pi-ai"
 import { providerOverride, refreshConsoleConfig } from "./console-config"
 import { mapRegionGateErrors } from "./region"
 import { writeModelsOverride } from "./models-config"
 import { OpencodeOAuthProvider } from "./opencode-provider"
-import { catalogModels, fetchCatalogModels, ZEN_CATALOG } from "./models"
+import { catalogModels, fetchCatalogModels, fetchFreeModels, freeModels } from "./models"
 import { OPENCODE_GO_PROVIDER, opencodeGoUsageProvider } from "./usage"
 import {
   CONSOLE_BASE,
@@ -51,8 +53,8 @@ import {
 export const WIRE_API = "opencode-go-wire"
 const UPSTREAM_API = "openai-completions"
 
-/** OpenCode Zen provider id (models.dev `opencode`, incl. the free tier). */
-export const ZEN_PROVIDER = "opencode"
+/** OpenCode free-tier provider id — free models only, never asks for a key. */
+export const FREE_PROVIDER = "opencode-free"
 
 // The Console device-flow login is filed by the `opencode` registration's
 // `config.oauth` (id = provider name; pi-catalog has no built-in `opencode`
@@ -60,10 +62,10 @@ export const ZEN_PROVIDER = "opencode"
 // `opencode-go` so both model providers pick it up.
 const CREDENTIALS_ID = "opencode-go"
 
-/** Test hooks: point the Console and gateway at a stub without touching code. */
+/** Test hooks: point the Console and gateways at a stub without touching code. */
 export const CONSOLE_BASE_ENV = "OMP_GO_CONSOLE"
-export const ZEN_BASE_ENV = "OMP_GO_ZEN"
-export const ZEN_FREE_BASE_ENV = "OMP_GO_ZEN_V1"
+export const GO_BASE_ENV = "OMP_GO_BASE"
+export const FREE_BASE_ENV = "OMP_GO_FREE"
 
 /**
  * Session identity emitted on the wire. omp exposes the live session through
@@ -108,6 +110,10 @@ function wireStream(providerID: string, identity: HarnessIdentity, consoleBase: 
     return mapRegionGateErrors(
       streamSimple(routed, context as Context, {
         ...streamOptions,
+        // Harness-order transport (src/ordered-fetch.ts): the free-tier gateway
+        // validates session-id encoding, and the harness's exact wire order keeps
+        // the traffic byte-faithful on every lane.
+        fetch: harnessFetch,
         // Fingerprint + Console-pushed headers win over anything static; the
         // org header attributes the request to the serving workspace exactly
         // as the harness's Console-driven provider does. Auth stays with the
@@ -133,7 +139,7 @@ function wireStream(providerID: string, identity: HarnessIdentity, consoleBase: 
 function projectModels(models: Model<Api>[], credentials: { orgId?: string }) {
   return models.map((model) => {
     const providerID = model.provider
-    if (providerID !== OPENCODE_GO_PROVIDER && providerID !== ZEN_PROVIDER) return model
+    if (providerID !== OPENCODE_GO_PROVIDER && providerID !== FREE_PROVIDER) return model
     const override = providerOverride(credentials.orgId, providerID)
     return Object.assign(Object.create(Object.getPrototypeOf(model)), model, {
       api: WIRE_API,
@@ -154,8 +160,8 @@ export function registerOpencodeGo(
 ): OpencodeOAuthProvider {
   const identity = options.identity ?? DEFAULT_IDENTITY
   const consoleBase = process.env[CONSOLE_BASE_ENV]
-  const goBase = process.env[ZEN_BASE_ENV] ?? ZEN_GO_BASE
-  const zenBase = process.env[ZEN_FREE_BASE_ENV] ?? ZEN_BASE
+  const goBase = process.env[GO_BASE_ENV] ?? ZEN_GO_BASE
+  const freeBase = process.env[FREE_BASE_ENV] ?? ZEN_BASE
   const oauth = new OpencodeOAuthProvider({ identity, server: consoleBase })
   const streamSimpleFor = (providerID: string) => wireStream(providerID, identity, consoleBase)
 
@@ -170,7 +176,7 @@ export function registerOpencodeGo(
     // stale OPENCODE_API_KEY in the shell hijack the chat path over the login
     // (the host validation accepts oauth alone).
     oauth: {
-      name: "OpenCode Go (service-account key)",
+      name: "OpenCode Console (Go subscription)",
       login: oauth.login.bind(oauth),
       refreshToken: oauth.refreshToken.bind(oauth),
       getApiKey: oauth.getApiKey.bind(oauth),
@@ -181,29 +187,29 @@ export function registerOpencodeGo(
     fetchDynamicModels: () => fetchCatalogModels({ session: sessionIdentity, identity }),
   }
 
-  // OpenCode Zen (incl. the free tier): same login, same fingerprint. `apiKey:
-  // "public"` is the harness's own free-tier fallback (OpencodePlugin sets it
-  // when no credential is present); a /login credential takes precedence.
-  const zenConfig: ProviderConfig = {
-    baseUrl: zenBase,
+  // OpenCode's free tier: same login, same fingerprint, free models only.
+  // `apiKey: "public"` is the harness's own free-tier fallback (OpencodePlugin
+  // sets it when no credential is present); a /login credential takes
+  // precedence and is what the harness sends when connected.
+  const freeConfig: ProviderConfig = {
+    baseUrl: freeBase,
     api: WIRE_API,
     authHeader: true,
     headers: { "user-agent": `opencode/${identity.channel}/${identity.version}/${identity.name}` },
-    streamSimple: streamSimpleFor(ZEN_PROVIDER),
+    streamSimple: streamSimpleFor(FREE_PROVIDER),
     apiKey: "public",
     // `storeCredentialsAs` is kept by the host's registration spread; the
     // published ProviderConfig.oauth type predates the field.
     oauth: {
-      name: oauth.name,
+      name: "OpenCode Console (shared account)",
       storeCredentialsAs: CREDENTIALS_ID,
       login: oauth.login.bind(oauth),
       refreshToken: oauth.refreshToken.bind(oauth),
       getApiKey: oauth.getApiKey.bind(oauth),
       modifyModels: projectModels,
     } as ProviderConfig["oauth"] & { storeCredentialsAs: string },
-    models: catalogModels(ZEN_CATALOG),
-    fetchDynamicModels: () =>
-      fetchCatalogModels({ session: sessionIdentity, identity, entryID: ZEN_PROVIDER }),
+    models: freeModels(),
+    fetchDynamicModels: () => fetchFreeModels({ session: sessionIdentity, identity }),
   }
 
   // The request path honors ~/.omp/agent/models.yml overrides on every model
@@ -212,7 +218,7 @@ export function registerOpencodeGo(
   // runs in every process and must not regress the block to defaults).
   writeModelsOverride({ identity })
   pi.registerProvider(OPENCODE_GO_PROVIDER, goConfig)
-  pi.registerProvider(ZEN_PROVIDER, zenConfig)
+  pi.registerProvider(FREE_PROVIDER, freeConfig)
 
   return oauth
 }

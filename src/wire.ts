@@ -6,6 +6,8 @@
 // github.com/anomalyco/opencode. `test/parity.ts` diffs this module's requests
 // against the golden trace; change nothing without re-running it.
 
+import { sessionIdentifier } from "./identifier"
+
 export type HarnessIdentity = {
   /** User-Agent channel segment, e.g. "latest". */
   channel: string
@@ -35,12 +37,14 @@ export type TraceContext = { trace: string; parent: string }
 const hex = (bytes: number) =>
   Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) => b.toString(16).padStart(2, "0")).join("")
 
-const BASE62 = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-
-/** Harness-shaped session id: `ses_` + 26 base62 chars (golden trace shape). */
+/**
+ * Harness session id: `ses_` + the harness's descending time encoding
+ * (12 hex + 14 base62). The free-tier gateway validates this encoding —
+ * "random-looking" ids are rejected as not-from-OpenCode (see
+ * `src/identifier.ts`).
+ */
 export function sessionID(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(26))
-  return `ses_${Array.from(bytes, (b) => BASE62[b % BASE62.length]).join("")}`
+  return sessionIdentifier()
 }
 
 /** Harness-shaped project id: 40 lowercase hex chars (golden trace shape). */
@@ -199,7 +203,7 @@ export const chatBody = (req: ChatRequest) => ({
   ...(req.omitStore ? {} : { store: false }),
 })
 
-export async function zenChatCompletion(
+export async function opencodeChatCompletion(
   req: ChatRequest,
   options: {
     token: string

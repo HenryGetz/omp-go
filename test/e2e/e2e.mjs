@@ -26,7 +26,7 @@ const OMP = process.env.OMP_BIN ?? "omp"
 const PORT = Number(process.env.E2E_STUB_PORT ?? 18990)
 const STUB_URL = `http://127.0.0.1:${PORT}`
 const DUMP = process.env.E2E_DUMP === "1"
-const PROVIDER = "OpenCode Console (Go subscription)"
+const PROVIDER = "OpenCode Console (shared account)"
 
 const home = mkdtempSync(path.join(tmpdir(), "omp-go-e2e-"))
 const workdir = path.join(home, "project")
@@ -41,7 +41,7 @@ const env = {
   XDG_STATE_HOME: path.join(home, ".local", "state"),
   XDG_CACHE_HOME: path.join(home, ".cache"),
   OMP_GO_CONSOLE: `${STUB_URL}/console`,
-  OMP_GO_ZEN: `${STUB_URL}/zen/go/v1`,
+  OMP_GO_BASE: `${STUB_URL}/zen/go/v1`,
   // Bootstrap key so a model exists before the OAuth login (omp's composer is
   // inert with "No model selected"). Stored /login credentials take precedence
   // over env keys, so the chat still exercises the OAuth path.
@@ -127,7 +127,7 @@ try {
   // 3. OAuth login: omp's terminal counterpart of /login (same AuthStorage
   // dispatch, loads extension providers) against the stub Console.
   await inTerminal("login", [], async (terminal, dump) => {
-    await terminal.run(OMP, ["login", "opencode"], { env, cwd: REPO, cols: 140, rows: 42, timeout: 120_000 })
+    await terminal.run(OMP, ["login", "opencode-free"], { env, cwd: REPO, cols: 140, rows: 42, timeout: 120_000 })
     await terminal.waitExit({ timeout: 90_000 }).catch(() => undefined)
     const out = (await terminal.getOutput().catch(() => "")) ?? (await terminal.text({ full: true }))
     if (!out.trim()) await dump()
