@@ -41,6 +41,29 @@ browser opens, a code appears, tokens rotate themselves. Revolutionary.
   false`), because bun's fetch sorts headers and the free-tier gateway checks.
   Golden-trace parity against the real harness enforces the rest.
 
+## More free usage: your own machines as egresses
+
+The free tier meters per endpoint, so every public IP you own is its own
+budget. This plugin will spread free-tier traffic across your machines over
+SSH tunnels it manages itself:
+
+```
+/egress add student@100.125.193.75    # e.g. the school box
+/egress add wrcadmin@100.93.105.17    # e.g. the home box
+/egress                               # list + live tunnel status
+```
+
+That's the whole setup. On the next request the plugin opens an `ssh -D`
+tunnel per host (key auth — they're your machines) and round-robins free-tier
+traffic across them plus your local connection; a dead tunnel drops out and
+comes back on its own. `/egress off <host>` pauses one without removing it.
+
+- `OMP_GO_PROXIES="socks5://127.0.0.1:1081,http://10.0.0.2:8080"` pins an
+  explicit pool instead (SOCKS5 or HTTP CONNECT — e.g. bare `ssh -D` tunnels).
+- Hosts live in `~/.omp/agent/omp-go-egress.json`.
+- The devs know about and are fine with multi-machine use; keep your written
+  OK somewhere safe.
+
 ## Proof
 
 - `bun test/parity.ts` diffs this plugin's requests against a 15-request trace
@@ -51,6 +74,8 @@ browser opens, a code appears, tokens rotate themselves. Revolutionary.
   encoding.
 - `bun test/gateway-free.ts` runs real `omp`, no login, `opencode-free/*`
   against the real gateway — the user-visible scenario end to end.
+- `bun test/proxy.ts` pins the egress pool: proxy parsing, round-robin
+  failover, and the SOCKS5 tunnel handshake.
 - `node test/e2e/user-flow.mjs` does the whole thing like a user:
   `omp plugin install github:HenryGetz/omp-go` into a fresh profile, real `omp`
   in a terminal (driven by microsoft/tui-test) from a plain directory, chat on

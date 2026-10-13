@@ -7,8 +7,8 @@
 //
 //   bun test/gateway-free.ts
 
-import { spawnSync } from "node:child_process"
-import { mkdtempSync, rmSync } from "node:fs"
+import { spawn } from "node:child_process"
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -31,14 +31,37 @@ delete env.OMP_GO_CONSOLE
 delete env.OMP_GO_BASE
 delete env.OMP_GO_FREE
 
-const result = spawnSync(
+// EGRESS_CONFIG=1 seeds the real egress host list so omp opens the ssh
+// tunnels itself (the pure product path: /egress add + auto-tunneling).
+const egressConfig = `${process.env.HOME ?? ""}/.omp/agent/omp-go-egress.json`
+if (process.env.EGRESS_CONFIG === "1" && existsSync(egressConfig)) {
+  mkdirSync(`${home}/.omp/agent`, { recursive: true })
+  copyFileSync(egressConfig, `${home}/.omp/agent/omp-go-egress.json`)
+}
+
+const timeoutMs = Number(process.env.FREE_TIMEOUT ?? 90_000)
+const { promise: finished, resolve: settle, reject: fail } = Promise.withResolvers<{ code: number | null; output: string }>()
+const child = spawn(
   OMP,
-  ["run", "--print", "--no-title", `--extension`, path.join(REPO, "src", "index.ts"), `--model=${MODEL}`, "Reply with exactly: FREE TIER OK"],
-  { env, cwd: REPO, encoding: "utf8", timeout: Number(process.env.FREE_TIMEOUT ?? 90_000) },
+  ["run", "--print", "--no-title", "--extension", path.join(REPO, "src", "index.ts"), `--model=${MODEL}`, "Reply with exactly: FREE TIER OK"],
+  { env, cwd: REPO, detached: true },
 )
-const output = `${result.stdout ?? ""}${result.stderr ?? ""}`
-console.log(output.trim())
-const ok = result.status === 0 && output.includes("FREE TIER OK")
+let output = ""
+child.stdout?.on("data", (chunk) => (output += chunk))
+child.stderr?.on("data", (chunk) => (output += chunk))
+const killer = setTimeout(() => {
+  // Kill the whole process group: omp's service daemon keeps stdio open and
+  // would otherwise outlive the timeout with the pipes pinned.
+  try { process.kill(-child.pid!, "SIGKILL") } catch { child.kill("SIGKILL") }
+}, timeoutMs)
+child.on("error", fail)
+child.on("exit", (code) => {
+  clearTimeout(killer)
+  settle({ code, output })
+})
+const { code, output: result } = await finished
+console.log(result.trim())
+const ok = code === 0 && result.includes("FREE TIER OK")
 if (!ok) {
   console.error("GATEWAY FAIL: free-tier chat did not complete end to end")
   console.error(`profile kept at ${home} (omp logs: ${home}/.local/state/omp)`)

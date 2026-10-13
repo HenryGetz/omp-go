@@ -22,10 +22,14 @@
 
 import http from "node:http"
 import https from "node:https"
+import type net from "node:net"
+import tls from "node:tls"
 import { Readable } from "node:stream"
 import zlib from "node:zlib"
 import type { Transform } from "node:stream"
 import { DEFAULT_IDENTITY, projectID, sessionID, userAgent } from "./wire"
+import { connectViaProxy, markProxyFailure, nextProxy, type Proxy } from "./proxy"
+import { egressProxies } from "./egress"
 
 // [lookup name, wire name] — the harness's header casing is part of the
 // fingerprint; node writes keys verbatim, so casing must be restored here.
@@ -146,31 +150,11 @@ export async function harnessFetch(input: RequestInfo | URL, init?: RequestInit)
   const body = bodyBytes(init?.body ?? undefined)
   const ordered = assembleHeaders(url, init?.headers ?? request.headers, body)
 
-  return await new Promise<Response>((resolve, reject) => {
-    const secure = url.protocol === "https:"
-    const requestFn = secure ? https.request : http.request
-    const req = requestFn(
-      {
-        host: url.hostname,
-        port: url.port || (secure ? 443 : 80),
-        path: url.pathname + url.search,
-        method,
-        headers: ordered,
-        setHost: false,
-        agent: secure ? agent : undefined,
-        servername: secure ? url.hostname : undefined,
-      },
-      (res) => {
-        const decompressor = decode(res.headers["content-encoding"])
-        const headers = new Headers()
-        for (const [name, value] of Object.entries(res.headers)) {
-          if (value === undefined || name === "content-encoding") continue
-          if (Array.isArray(value)) for (const v of value) headers.append(name, v)
-          else headers.set(name, value)
-        }
-        resolve(new Response(webStream(res, decompressor), { status: res.statusCode ?? 0, statusText: res.statusMessage, headers }))
-      },
-    )
+  const { promise, resolve, reject } = Promise.withResolvers<Response>()
+  const secure = url.protocol === "https:"
+  const requestFn = secure ? https.request : http.request
+
+  const respond = (req: http.ClientRequest) => {
     req.on("error", reject)
     const signal = init?.signal
     if (signal) {
@@ -180,7 +164,57 @@ export async function harnessFetch(input: RequestInfo | URL, init?: RequestInit)
       }
       signal.addEventListener("abort", () => req.destroy(new Error("aborted")), { once: true })
     }
+    req.on("response", (res) => {
+      const decompressor = decode(res.headers["content-encoding"])
+      const headers = new Headers()
+      for (const [name, value] of Object.entries(res.headers)) {
+        if (value === undefined || name === "content-encoding") continue
+        if (Array.isArray(value)) for (const v of value) headers.append(name, v)
+        else headers.set(name, value)
+      }
+      resolve(new Response(webStream(res, decompressor), { status: res.statusCode ?? 0, statusText: res.statusMessage, headers }))
+    })
     if (body) req.write(body)
     req.end()
-  })
+  }
+
+  // Egress pool (src/proxy.ts): round-robin, failover to the next proxy, and
+  // direct only when every proxy is down (or none configured).
+  const proxies = await egressProxies()
+  const attempted = new Set<string>()
+  const openTunnel = async (): Promise<{ proxy?: Proxy; socket?: net.Socket }> => {
+    for (;;) {
+      const candidates = proxies.filter((proxy) => !attempted.has(proxy.raw))
+      const proxy = nextProxy(candidates.length > 0 ? candidates : proxies.length === 0 ? [] : candidates)
+      if (!proxy) return {}
+      attempted.add(proxy.raw)
+      try {
+        const tunnel = await connectViaProxy(proxy, url.hostname, Number(url.port) || (secure ? 443 : 80))
+        const socket = secure
+          ? tls.connect({ socket: tunnel, servername: url.hostname })
+          : tunnel
+        return { proxy, socket }
+      } catch {
+        markProxyFailure(proxy)
+      }
+    }
+  }
+
+  void (async () => {
+    const { socket } = await openTunnel()
+    const options: https.RequestOptions = {
+      host: url.hostname,
+      port: url.port || (secure ? 443 : 80),
+      path: url.pathname + url.search,
+      method,
+      headers: ordered,
+      setHost: false,
+      ...(socket
+        ? { createConnection: () => socket as never, agent: false as never }
+        : { agent: secure ? agent : undefined, servername: secure ? url.hostname : undefined }),
+    }
+    respond(requestFn(options))
+  })().catch(reject)
+
+  return promise
 }

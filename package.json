@@ -1,6 +1,6 @@
 {
   "name": "omp-go",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "OpenCode for Oh My Pi: the Go subscription and OpenCode's free tier (keyless) \u2014 wire-identical to the opencode harness.",
   "type": "module",
   "main": "./src/index.ts",
@@ -28,7 +28,7 @@
     "free-tier"
   ],
   "scripts": {
-    "test": "bun test/parity.ts && bun test/transport.ts",
+    "test": "bun test/parity.ts && bun test/transport.ts && bun test/proxy.ts",
     "typecheck": "tsc --noEmit"
   }
 }
