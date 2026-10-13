@@ -30,6 +30,7 @@ import type { Transform } from "node:stream"
 import { DEFAULT_IDENTITY, projectID, sessionID, userAgent } from "./wire"
 import { connectViaProxy, markProxyFailure, nextProxy, type Proxy } from "./proxy"
 import { egressProxies } from "./egress"
+import { appendFileSync } from "node:fs"
 import { buildRequestHead, readHttpResponse } from "./raw-http"
 
 // [lookup name, wire name] — the harness's header casing is part of the
@@ -202,7 +203,15 @@ export async function harnessFetch(input: RequestInfo | URL, init?: RequestInit)
   }
 
   void (async () => {
-    const { socket } = await openTunnel()
+    const { proxy, socket } = await openTunnel()
+    if (process.env.OMP_GO_WIRE_LOG) {
+      // Test/diagnostic hook: record which hop carried each request.
+      try {
+        appendFileSync(process.env.OMP_GO_WIRE_LOG, `${JSON.stringify({ method, url: url.toString(), hop: proxy?.raw ?? "direct" })}\n`)
+      } catch {
+        // best-effort
+      }
+    }
     if (socket) {
       // Proxied: write the hand-built head over the tunnel socket and parse the
       // response ourselves — node's client ignores createConnection and dials

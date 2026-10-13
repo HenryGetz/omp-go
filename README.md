@@ -101,6 +101,10 @@ Keep the written OK somewhere safe.
   `opencode-free/mimo-v2.6-flash-free`, assert the model's actual answer.
 - `bun test/e2e/egress-onboarding.mjs` drives the `/egress` onboarding itself
   under microsoft/tui-test: the dialog, the add, the egress-IP report.
+- `node test/e2e/egress-free.mjs` is the full integration in a real terminal
+  (microsoft/tui-test): the plugin opens the SSH tunnel from the host list,
+  a free-tier chat completes in the TUI, and a wire log proves the chat was
+  carried by the tunnel with zero requests leaked to a direct connection.
 
 ## Fine print
 
