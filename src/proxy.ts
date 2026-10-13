@@ -176,8 +176,22 @@ export async function connectViaProxy(proxy: Proxy, host: string, port: number, 
     await promise
   }
   try {
-    if (proxy.protocol === "socks5") await socks5Connect(socket, proxy, host, port)
-    else await httpConnect(socket, proxy, host, port)
+    // Whole-handshake deadline: a half-dead tunnel (slow or wedged ssh) would
+    // otherwise sit in the greeting exchange forever and hang the request
+    // instead of failing over to the next hop.
+    const { promise: handshake, resolve: done, reject: bail } = Promise.withResolvers<void>()
+    const timer = setTimeout(() => bail(new Error(`proxy ${proxy.raw}: handshake timeout`)), timeoutMs)
+    void (async () => {
+      if (proxy.protocol === "socks5") await socks5Connect(socket, proxy, host, port)
+      else await httpConnect(socket, proxy, host, port)
+    })().then(() => {
+      clearTimeout(timer)
+      done()
+    }, (error) => {
+      clearTimeout(timer)
+      bail(error as Error)
+    })
+    await handshake
     return socket
   } catch (error) {
     socket.destroy()
