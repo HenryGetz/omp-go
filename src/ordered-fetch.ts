@@ -63,7 +63,7 @@ const SESSION = sessionID()
 const PROJECT = projectID()
 const TRACE = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("")
 /** Provider "wait this long" hints — stripped on account verdicts (see respond()). */
-const WAIT_HINT = /^(retry-after|retry-after-ms|x-ratelimit-reset.*|ratelimit-reset.*)$/i
+export const WAIT_HINT = /^(retry-after|retry-after-ms|x-ratelimit-reset.*|ratelimit-reset.*)$/i
 let spans = 0
 
 type HeaderInput = HeadersInit | undefined

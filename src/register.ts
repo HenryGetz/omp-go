@@ -284,25 +284,34 @@ export function registerOpencodeGo(
   // are switched on for an `opencode-free` session.
   registerHarnessTools(pi)
   let collidingRegistered = false
-  const ensureHarnessTools = (ctx: { model?: Model<Api> }): void => {
-    void (async () => {
-      const provider = ctx.model?.provider
-      if (provider !== FREE_PROVIDER) return
-      // The colliding wrappers re-register omp's read/edit/glob/grep/write, so
-      // this runs only on a free-lane session — the Go lane keeps the built-ins.
-      if (!collidingRegistered) {
-        registerCollidingHarnessTools(pi)
-        collidingRegistered = true
-      }
-      await activateHarnessTools(pi, provider)
-    })().catch(() => undefined)
+  const ensureHarnessTools = async (ctx: { model?: Model<Api> }): Promise<void> => {
+    const provider = ctx.model?.provider
+    if (provider !== FREE_PROVIDER) return
+    // The colliding wrappers re-register omp's read/edit/glob/grep/write, so
+    // this runs only on a free-lane session — the Go lane keeps the built-ins.
+    if (!collidingRegistered) {
+      registerCollidingHarnessTools(pi)
+      collidingRegistered = true
+    }
+    // includeColliding: the five colliding wrappers replace omp's built-ins,
+    // so the active set must be rebuilt (not merely extended) or their calls
+    // resolve to stale entries ("Tool read/write not found").
+    await activateHarnessTools(pi, provider, true)
   }
-  pi.on("session_start", (_event, ctx) => ensureHarnessTools(ctx))
-  pi.on("before_agent_start", (_event, ctx) => ensureHarnessTools(ctx))
+  pi.on("session_start", (_event, ctx) => {
+    void ensureHarnessTools(ctx).catch(() => undefined)
+  })
+  pi.on("before_agent_start", (_event, ctx) => {
+    void ensureHarnessTools(ctx).catch(() => undefined)
+  })
   // The free lane's built payload carries the harness's own `tools` array; the
-  // Go lane keeps whatever omp built.
-  pi.on("before_provider_request", (event, ctx) => {
+  // Go lane keeps whatever omp built. Activation is AWAITED here — the earlier
+  // fire-and-forget activation raced the first turn, so the model saw `shell`
+  // in its tool list while the host registry still lacked it ("Tool shell not
+  // found"). Ordering is now guaranteed: active tools before the request.
+  pi.on("before_provider_request", async (event, ctx) => {
     if (ctx.model?.provider !== FREE_PROVIDER) return undefined
+    await ensureHarnessTools(ctx).catch(() => undefined)
     return rewriteFreeLanePayload(event.payload)
   })
 

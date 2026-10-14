@@ -16,7 +16,7 @@ async function failureOf(source: AssistantMessageEventStream) {
     await source.result()
     return undefined
   } catch (error) {
-    return error as { status?: number; message?: string }
+    return error as { status?: number; message?: string; headers?: Record<string, unknown>; cause?: unknown }
   }
 }
 
@@ -40,6 +40,29 @@ async function failureOf(source: AssistantMessageEventStream) {
   assert.equal(error?.status, 403)
   assert.match(error?.message ?? "", /account verdict/)
   assert.match(error?.message ?? "", /not a member of this workspace/)
+}
+
+// Wait hints leave with the verdict: the gateway's retry-after on a 402
+// describes the ACCOUNT's window reset (~28 min), not this request. Left on
+// the error object, omp's turn-recovery takes its fail-fast exit ("Retry
+// failed: Provider requested …ms wait, exceeds retry.maxDelayMs") instead of
+// retrying into a healthy sibling — the exact surfaced failure.
+{
+  const src = createAssistantMessageEventStream()
+  const out = mapRegionGateErrors(src)
+  const cause = { headers: { "retry-after-ms": "1710878", "x-ratelimit-reset": "1711" } }
+  src.fail({
+    status: 402,
+    message: "Upstream request failed: Insufficient account funds",
+    type: "server_error",
+    headers: { "retry-after-ms": "1710878", "content-type": "application/json" },
+    cause,
+  })
+  const error = await failureOf(out)
+  assert.equal(error?.status, 403, "still promoted to the rotation lane")
+  assert.equal(error?.headers?.["retry-after-ms"], undefined, "top-level wait hints stripped")
+  assert.equal(error?.headers?.["content-type"], "application/json", "non-hint headers preserved")
+  assert.equal((cause.headers as Record<string, unknown>)["retry-after-ms"], undefined, "cause-chain hints stripped")
 }
 
 // Region gate keeps its own guidance and rotation

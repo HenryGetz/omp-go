@@ -83,21 +83,42 @@ const num = (value: unknown): number | undefined => (typeof value === "number" &
 
 const text = (value: string): AgentToolResult<unknown> => ({ content: [{ type: "text", text: value }] })
 
+/** Marker line prefix carrying `execute`'s returned value back to the tool result. */
+const RESULT_PREFIX = "__omp_execute_result__:"
+
 /** Whether a name is a harness-only wrapper this module registers. */
 export const isHarnessOnlyName = (name: string): boolean => HARNESS_ONLY[name] === true
 
 // --- Request-side rewrite ----------------------------------------------------
 
 /**
+ * Responses-protocol function tools put `name` at the TOP level
+ * (`{type:"function", name, description, parameters}`); chat-completions
+ * nests it under `function`. The harness sends each shape on its protocol —
+ * a chat-shaped tool on the Responses API is rejected with
+ * `400 Missing required parameter: tools[0].name`.
+ */
+export const HARNESS_TOOLS_RESPONSES: readonly Record<string, unknown>[] = HARNESS_TOOLS.map((tool) => ({
+  type: "function",
+  name: tool.function.name,
+  description: tool.function.description,
+  parameters: tool.function.parameters,
+}))
+
+/**
  * Replace a built provider payload's `tools` array with the harness's exact 12.
  * Returns the payload unchanged when it carries no tools (a tool-less turn —
  * e.g. a title/compaction call — must not gain a tool surface it never had).
+ * Shape follows the protocol: flat tools for Responses payloads (`input`),
+ * chat-wrapped for completions payloads (`messages`).
  */
 export function rewriteFreeLanePayload(payload: unknown): unknown {
   if (typeof payload !== "object" || payload === null || !("tools" in payload)) return payload
   const tools = payload.tools
   if (!Array.isArray(tools) || tools.length === 0) return payload
-  return { ...payload, tools: HARNESS_TOOLS.map((tool) => tool) }
+  const responses = "input" in payload && !("messages" in payload)
+  const surface = responses ? HARNESS_TOOLS_RESPONSES : HARNESS_TOOLS
+  return { ...payload, tools: surface.map((tool) => tool) }
 }
 
 /** True when a payload's `tools` array is the harness's exact 12, in order. */
@@ -313,11 +334,41 @@ function makeWrappers(pi: ExtensionAPI): ToolDefinition<WrapperSchema, unknown>[
     execute: async (_id, params, signal, _onUpdate, ctx) => {
       const code = str(params.code)
       if (!code) throw new Error("execute: `code` is required")
+      // The harness's execute evaluates a FUNCTION BODY: models write
+      // `return {...}` and expect the value as the tool result. Run the code
+      // wrapped in an async function so `return` and top-level await both
+      // work, and surface the returned value as the headline.
+      const wrapped = [
+        "(async () => {",
+        code,
+        "})().then((value) => {",
+        `  if (value !== undefined) process.stdout.write("\\n${RESULT_PREFIX}" + JSON.stringify(value) + "\\n")`,
+        "}).catch((error) => {",
+        "  console.error(String((error && error.stack) || error))",
+        "  process.exitCode = 1",
+        "})",
+      ].join("\n")
       const runtime = process.versions.bun ? "bun" : process.execPath
-      const args = runtime === "bun" ? ["-e", code] : ["--input-type=module", "-e", code]
+      const args = runtime === "bun" ? ["-e", wrapped] : ["--input-type=module", "-e", wrapped]
       const result = await pi.exec(runtime, args, { cwd: ctx.cwd, signal })
-      const output = [result.stdout, result.stderr].filter((part) => part.trim().length > 0).join("\n").trim()
-      return text(`${output || "(no output)"}\n\nexit ${result.code}`)
+      const lines = [result.stdout, result.stderr]
+        .filter((part) => part.trim().length > 0)
+        .join("\n")
+        .split("\n")
+      const valueLine = lines.find((line) => line.startsWith(RESULT_PREFIX))
+      const rest = lines.filter((line) => !line.startsWith(RESULT_PREFIX)).join("\n").trim()
+      const returned = valueLine?.slice(RESULT_PREFIX.length)
+      const status = `exit ${result.code}`
+      if (returned !== undefined) {
+        let pretty = returned
+        try {
+          pretty = JSON.stringify(JSON.parse(returned), null, 2)
+        } catch {
+          // Not JSON: show the raw serialization.
+        }
+        return text(`${pretty}${rest ? `\n\n${rest}` : ""}\n\n${status}`)
+      }
+      return text(`${rest || "(no output)"}\n\n${status}`)
     },
   }
 
@@ -443,8 +494,20 @@ export async function activateHarnessTools(
   // Never clobber an empty snapshot into a wrapper-only set: wait until the
   // session's built-in tool surface is established.
   if (active.length === 0) return false
-  const wanted = includeColliding ? HARNESS_TOOL_NAMES : HARNESS_ONLY_NAMES
-  const missing = wanted.filter((name) => !active.includes(name))
+  if (includeColliding) {
+    // The colliding wrappers REPLACE omp's built-ins in the registry, so an
+    // active list built earlier holds STALE entries for those names — the
+    // host then answers their calls with "Tool not found". Rebuild the set
+    // so every harness name re-resolves against the current registry.
+    const rebuilt = [
+      ...active.filter((name) => !HARNESS_TOOL_NAMES.includes(name) && !COLLIDING_NAMES.includes(name)),
+      ...HARNESS_TOOL_NAMES,
+    ]
+    if (rebuilt.length === active.length && HARNESS_TOOL_NAMES.every((name) => active.includes(name))) return false
+    await pi.setActiveTools(rebuilt)
+    return true
+  }
+  const missing = HARNESS_ONLY_NAMES.filter((name) => !active.includes(name))
   if (missing.length === 0) return false
   await pi.setActiveTools([...active, ...missing])
   return true

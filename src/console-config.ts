@@ -12,6 +12,7 @@
 // its last snapshot.
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { withStateLock } from "./state-lock"
 import { homedir } from "node:os"
 import path from "node:path"
 import { fetchConsoleConfig, type HarnessIdentity } from "./wire"
@@ -67,7 +68,7 @@ function saveSnapshot(key: string, snapshot: ConsoleConfigSnapshot): void {
       all = {}
     }
     all[key] = snapshot
-    writeFileSync(cacheFile(), JSON.stringify(all), { mode: 0o600 })
+    withStateLock(() => writeFileSync(cacheFile(), JSON.stringify(all), { mode: 0o600 }))
   } catch {
     // Cache persistence is best-effort; the in-memory copy still serves.
   }

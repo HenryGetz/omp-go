@@ -75,21 +75,41 @@ async function runOmp(label: string, prompt: string, extraArgs: string[] = []): 
 
 const failures: string[] = []
 
-// One run proves both halves: the gateway accepts the free-lane request (the
-// harness tool surface gate) and a real tool call executes end to end. The
-// marker reaches the reply only when omp's shell executor actually ran. Free
-// models occasionally answer without calling the tool, so retry the attempt.
-const prompt =
-  'Run the shell tool exactly once with command "echo FREE_TOOL_OK" (do not call any other tool). ' +
-  "Then reply with the command's stdout verbatim and nothing else."
+// The agent battery: every harness-named wrapper must EXECUTE with real
+// effects against the real gateway — the acceptance the tool mirror exists
+// for. Models write `return {...}` into execute, so its function-body
+// semantics are part of the contract, and "Tool … not found" must never
+// appear (the activation ordering). Free models occasionally skip tools, so
+// retry the attempt.
+const markerFile = path.join(home, "battery-marker.txt")
+const doneFile = path.join(home, "battery-done.txt")
+const prompt = [
+  "Use exactly these tools, one call each, in this order:",
+  `1. the shell tool with command: echo FREE_TOOL_OK > ${markerFile}`,
+  "2. the execute tool with JavaScript code that ends with: return { ok: 7 }",
+  `3. the write tool to write the text written-ok to ${doneFile}`,
+  `4. the read tool on ${doneFile}`,
+  'Then reply with exactly: BATTERY DONE {"ok":7}',
+].join("\n")
+const effects = () => ({
+  marker: existsSync(markerFile) && readFileSync(markerFile, "utf8").includes("FREE_TOOL_OK"),
+  done: existsSync(doneFile) && readFileSync(doneFile, "utf8").includes("written-ok"),
+})
 let last: { code: number | null; output: string } | undefined
 for (let attempt = 1; attempt <= attempts; attempt += 1) {
-  last = await runOmp(`tool-${attempt}`, prompt)
-  console.log(`[tool ${attempt}] ${last.output}`)
-  if (last.code === 0 && last.output.includes("FREE_TOOL_OK")) break
+  last = await runOmp(`battery-${attempt}`, prompt)
+  console.log(`[battery ${attempt}] ${last.output.slice(0, 400)}`)
+  const { marker, done } = effects()
+  if (last.code === 0 && marker && done && last.output.includes("BATTERY DONE")) break
 }
-if (!last || last.code !== 0 || !last.output.includes("FREE_TOOL_OK"))
-  failures.push("free-tier tool call (shell) did not execute end to end")
+const { marker, done } = effects()
+if (!last || last.code !== 0) failures.push("free-tier battery turn did not complete")
+if (!marker) failures.push("shell wrapper did not execute (no marker file)")
+if (!done) failures.push("write wrapper did not execute (no done file)")
+if (!last?.output.includes("BATTERY DONE")) failures.push("agent did not finish the tool battery")
+if (!/"ok"\s*:\s*7/.test(last?.output ?? ""))
+  failures.push("execute wrapper did not surface its return value (function-body semantics)")
+if (/not found/i.test(last?.output ?? "")) failures.push("a mirrored tool was not found at call time (activation ordering)")
 if (last?.output.includes("FreeTierError")) failures.push("gateway rejected the free-lane request (FreeTierError)")
 
 if (failures.length > 0) {
@@ -97,5 +117,5 @@ if (failures.length > 0) {
   console.error(`profile kept at ${home}`)
   process.exit(1)
 }
-console.log(`GATEWAY OK: ${MODEL} completed keyless against the real free tier, including a shell tool call`)
+console.log(`GATEWAY OK: ${MODEL} completed keyless against the real free tier, including the full tool battery (shell/execute/read/write)`)
 rmSync(home, { recursive: true, force: true })

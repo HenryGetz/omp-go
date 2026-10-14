@@ -12,6 +12,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process"
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { withStateLock } from "./state-lock"
 import https from "node:https"
 import net from "node:net"
 import { homedir } from "node:os"
@@ -44,7 +45,7 @@ export function listHosts(): EgressHost[] {
 function saveHosts(hosts: EgressHost[]): void {
   try {
     mkdirSync(path.dirname(configFile()), { recursive: true })
-    writeFileSync(configFile(), `${JSON.stringify({ hosts }, null, 2)}\n`, { mode: 0o600 })
+    withStateLock(() => writeFileSync(configFile(), `${JSON.stringify({ hosts }, null, 2)}\n`, { mode: 0o600 }))
   } catch {
     // Best-effort: the pool degrades to env-only when the file is unwritable.
   }

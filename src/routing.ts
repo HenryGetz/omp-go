@@ -35,6 +35,7 @@ import { homedir } from "node:os"
 import path from "node:path"
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types"
 import { orgVerdict } from "./verdicts"
+import { withStateLock } from "./state-lock"
 
 /** The host's own AuthStorage type, derived from the extension API namespace. */
 type HostAuth = Awaited<ReturnType<ExtensionAPI["pi"]["discoverAuthStorage"]>>
@@ -105,11 +106,13 @@ function saveState(state: RoutingState): void {
 
 function touch(orgId: string | undefined, patch: (state: AccountState) => void): void {
   if (!orgId) return
-  const state = loadState()
-  const entry = state[orgId] ?? {}
-  patch(entry)
-  state[orgId] = entry
-  saveState(state)
+  withStateLock(() => {
+    const state = loadState()
+    const entry = state[orgId] ?? {}
+    patch(entry)
+    state[orgId] = entry
+    saveState(state)
+  })
 }
 
 /**
@@ -227,5 +230,122 @@ export async function pinNewSession(
   })
   const pick = chooseAccount(candidates)
   if (pick === undefined) return false
-  return auth.sessions.pin(provider, sessionId, pick)
+  const pinned = auth.sessions.pin(provider, sessionId, pick)
+  if (pinned) {
+    hostApi = api
+    noteSessionPin(sessionId, candidates.find((candidate) => candidate.credentialId === pick)?.orgId, pick)
+  }
+  return pinned
+}
+
+// ─── Verdict-driven re-pin ─────────────────────────────────────────────────
+//
+// A session pinned to an account that later gets a verdict (402 funds / 403
+// workspace / region policy) would keep landing on it every turn once the
+// in-turn rotation has spent its retry budget — the "Retry failed: Provider
+// requested …ms wait" death spiral. When the verdict lands, move those
+// sessions' pins to the healthy sibling so the NEXT turn starts clean.
+
+type PinRecord = { sessionId: string; orgId?: string; credentialId: number; at: number }
+
+let hostApi: ExtensionAPI | undefined
+
+function pinsFile(): string {
+  return path.join(process.env.HOME || homedir(), ".omp", "agent", "omp-go-pins.json")
+}
+
+const PIN_TTL_MS = 7 * 24 * 60 * 60 * 1000
+
+function loadPins(): PinRecord[] {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(pinsFile(), "utf8"))
+    if (!Array.isArray(parsed)) return []
+    const now = Date.now()
+    const pins: PinRecord[] = []
+    for (const entry of parsed) {
+      if (typeof entry !== "object" || entry === null) continue
+      const sessionId = "sessionId" in entry ? entry.sessionId : undefined
+      const credentialId = "credentialId" in entry ? entry.credentialId : undefined
+      const at = "at" in entry ? entry.at : undefined
+      const orgId = "orgId" in entry ? entry.orgId : undefined
+      if (typeof sessionId !== "string" || typeof credentialId !== "number") continue
+      if (typeof at !== "number" || now - at > PIN_TTL_MS) continue
+      pins.push({ sessionId, credentialId, at, ...(typeof orgId === "string" ? { orgId } : {}) })
+    }
+    return pins
+  } catch {
+    return []
+  }
+}
+
+function savePins(pins: PinRecord[]): void {
+  try {
+    const file = pinsFile()
+    mkdirSync(path.dirname(file), { recursive: true })
+    const tmp = `${file}.tmp`
+    writeFileSync(tmp, JSON.stringify(pins), { mode: 0o600 })
+    renameSync(tmp, file)
+  } catch {
+    // Best-effort: pin bookkeeping must never break a request.
+  }
+}
+
+function noteSessionPin(sessionId: string, orgId: string | undefined, credentialId: number): void {
+  withStateLock(() => {
+    const pins = loadPins().filter((pin) => pin.sessionId !== sessionId)
+    pins.push({ sessionId, orgId, credentialId, at: Date.now() })
+    savePins(pins)
+  })
+}
+
+/**
+ * Move every session pinned to `verdictOrgId` onto a healthy sibling. Called
+ * when an account verdict lands (src/region.ts); best-effort and fire-and-
+ * forget — the in-turn rotation remains the first line of defense.
+ */
+export async function repinAfterVerdict(verdictOrgId: string | undefined, provider = "opencode-go"): Promise<void> {
+  if (!hostApi || !verdictOrgId) return
+  const pins = loadPins()
+  const affected = pins.filter((pin) => pin.orgId === verdictOrgId)
+  if (affected.length === 0) return
+  const auth = await hostApi.pi.discoverAuthStorage()
+  const accounts = auth.oauth.accounts(provider)
+  if (accounts.length === 0) return
+  let health: Awaited<ReturnType<HostAuth["health"]["model"]>> | undefined
+  try {
+    health = await auth.health.model(provider, { reserveFraction: 0 })
+  } catch {
+    health = undefined
+  }
+  const state = loadState()
+  const candidates: RoutingCandidate[] = accounts
+    .filter((account) => account.orgId !== verdictOrgId && !orgVerdict(account.orgId))
+    .map((account) => {
+      const measured = health?.accounts.find((entry) => entry.credentialId === account.credentialId)
+      const routing = account.orgId !== undefined ? state[account.orgId] : undefined
+      return {
+        credentialId: account.credentialId,
+        orgId: account.orgId,
+        state: measured?.state,
+        remainingFraction: measured?.remainingFraction,
+        usedPct: routing?.usedPct,
+        lastServedAtMs: routing?.lastServedAtMs,
+      }
+    })
+  const pick = chooseAccount(candidates)
+  if (pick === undefined) return
+  const targetOrg = candidates.find((candidate) => candidate.credentialId === pick)?.orgId
+  withStateLock(() => {
+    const fresh = loadPins()
+    for (const pin of affected) {
+      if (!auth.sessions.pin(provider, pin.sessionId, pick)) continue
+      const live = fresh.find((entry) => entry.sessionId === pin.sessionId)
+      const target = live ?? pin
+      target.credentialId = pick
+      target.orgId = targetOrg
+      target.at = Date.now()
+      if (!live) fresh.push(target)
+    }
+    savePins(fresh)
+  })
 }

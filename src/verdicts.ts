@@ -17,6 +17,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
+import { withStateLock } from "./state-lock"
 
 export type AccountVerdict = {
   kind: "funds" | "workspace" | "region"
@@ -68,9 +69,11 @@ export function markAccountVerdict(token: string | undefined, verdict: AccountVe
   if (!token) return
   verdicts.set(token, verdict)
   if (!orgId) return
-  const state = loadOrgVerdicts()
-  state[orgId] = verdict
-  saveOrgVerdicts(state)
+  withStateLock(() => {
+    const state = loadOrgVerdicts()
+    state[orgId] = verdict
+    saveOrgVerdicts(state)
+  })
 }
 
 /** TTL-aware read; expired verdicts delete themselves (account may have healed). */
@@ -94,5 +97,5 @@ export function orgVerdict(orgId: string | undefined): AccountVerdict | undefine
 /** Test hook. */
 export function clearAccountVerdicts(): void {
   verdicts.clear()
-  saveOrgVerdicts({})
+  withStateLock(() => saveOrgVerdicts({}))
 }

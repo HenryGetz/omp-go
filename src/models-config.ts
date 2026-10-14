@@ -19,6 +19,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 import { providerOverride } from "./console-config"
+import { withStateLock } from "./state-lock"
 import { GO_CATALOG, OPENCODE_CATALOG, thinkingOverrides } from "./models"
 import {
   DEFAULT_IDENTITY,
@@ -81,11 +82,18 @@ function stableIds(): { session: string; project: string } {
     const ids = { session: sessionID(), project: projectID() }
     try {
       mkdirSync(path.dirname(file), { recursive: true })
-      writeFileSync(file, JSON.stringify(ids), { mode: 0o600 })
+      // Create-exclusive: when two fresh processes race, one writes and the
+      // other re-reads, so every process shares one stable pair.
+      writeFileSync(file, JSON.stringify(ids), { mode: 0o600, flag: "wx" })
+      return ids
     } catch {
-      // Best-effort; ids regenerate per run when persistence fails.
+      try {
+        return JSON.parse(readFileSync(file, "utf8")) as { session: string; project: string }
+      } catch {
+        // Best-effort; ids regenerate per run when persistence fails.
+        return ids
+      }
     }
-    return ids
   }
 }
 
@@ -154,6 +162,7 @@ export function writeModelsOverride(input: { orgId?: string; identity?: HarnessI
   const block = [BEGIN, "providers:", ...entries, END].join("\n")
 
   const file = modelsFile()
+  withStateLock(() => {
   let content = ""
   try {
     content = readFileSync(file, "utf8")
@@ -182,4 +191,5 @@ export function writeModelsOverride(input: { orgId?: string; identity?: HarnessI
   } catch {
     // Best-effort: the plugin still works without the static override.
   }
+  })
 }

@@ -21,6 +21,8 @@ import type { AssistantMessageEvent, AssistantMessageEventStream } from "@oh-my-
 import { createAssistantMessageEventStream } from "@oh-my-pi/pi-ai"
 import { markAccountVerdict } from "./verdicts"
 import { orgForToken } from "./opencode-provider"
+import { WAIT_HINT } from "./ordered-fetch"
+import { repinAfterVerdict } from "./routing"
 
 const REGION_GATE = /requires\s+Global\s+regions|Privacy settings/i
 const ACCOUNT_GATE = /Insufficient account funds|Workspace access denied/i
@@ -61,6 +63,33 @@ function reshape<T>(value: T): T {
 }
 
 /**
+ * Strip provider wait hints from an account-verdict error object.
+ *
+ * The gateway's retry-after on a 402/403 verdict describes the ACCOUNT's
+ * window reset ("come back in ~28 min"), not this request. Left on the error,
+ * omp's turn-recovery reads it and takes its fail-fast exit ("Retry failed:
+ * Provider requested 1710878ms wait, exceeds retry.maxDelayMs") — surfacing
+ * the failure even when a healthy sibling exists. Stripped, the flow retries
+ * and the 403 rotation lane picks the sibling instead. Honored carriers (per
+ * pi-ai's getHeadersFromError): `headers`, `response.headers`, and the
+ * `cause` chain.
+ */
+function stripWaitHintsFromError(value: unknown, depth = 0): void {
+  if (!value || typeof value !== "object" || depth > 4) return
+  const record = value as { headers?: unknown; response?: { headers?: unknown }; cause?: unknown }
+  for (const holder of [record, record.response]) {
+    const headers = holder?.headers
+    if (headers instanceof Headers) {
+      for (const name of [...headers.keys()]) if (WAIT_HINT.test(name)) headers.delete(name)
+    } else if (headers && typeof headers === "object") {
+      const map = headers as Record<string, unknown>
+      for (const name of Object.keys(map)) if (WAIT_HINT.test(name)) delete map[name]
+    }
+  }
+  stripWaitHintsFromError(record.cause, depth + 1)
+}
+
+/**
  * Wrap a provider stream so account-scoped denials (region policy, funds,
  * workspace membership) leave it classified as credential-rotatable (403) and
  * self-explanatory. Stream semantics are
@@ -78,6 +107,10 @@ export function mapRegionGateErrors(source: AssistantMessageEventStream, token?:
       // pooler must stop preferring a broken 0%-usage account.
       const text = JSON.stringify(error)
       if (REGION_GATE.test(text) || ACCOUNT_GATE.test(text)) {
+        stripWaitHintsFromError(error)
+        // Move sessions pinned to this account onto a healthy sibling now —
+        // the next turn must not walk back into the same verdict.
+        void repinAfterVerdict(orgForToken(token))
         markAccountVerdict(token, {
           kind: /Insufficient account funds/i.test(text) ? "funds" : /Workspace access denied/i.test(text) ? "workspace" : "region",
           message: /Insufficient account funds/i.test(text)

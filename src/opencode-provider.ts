@@ -32,6 +32,7 @@ import {
 import { refreshConsoleConfig } from "./console-config"
 import { writeModelsOverride } from "./models-config"
 import { noteServedOrg } from "./routing"
+import { withStateLock } from "./state-lock"
 import { providerOverride } from "./console-config"
 import {
   CONSOLE_BASE,
@@ -100,14 +101,16 @@ function loadSidecar(): void {
 }
 
 function persistSidecar(): void {
-  try {
-    mkdirSync(path.dirname(orgsFile()), { recursive: true })
-    // Bound the file: tokens rotate; keep only the newest handful.
-    const entries = [...tokenOrgs.entries()].slice(-32)
-    writeFileSync(orgsFile(), `${JSON.stringify(Object.fromEntries(entries))}\n`, { mode: 0o600 })
-  } catch {
-    // best-effort
-  }
+  withStateLock(() => {
+    try {
+      mkdirSync(path.dirname(orgsFile()), { recursive: true })
+      // Bound the file: tokens rotate; keep only the newest handful.
+      const entries = [...tokenOrgs.entries()].slice(-32)
+      writeFileSync(orgsFile(), `${JSON.stringify(Object.fromEntries(entries))}\n`, { mode: 0o600 })
+    } catch {
+      // best-effort
+    }
+  })
 }
 
 export function indexTokenOrg(token: string | undefined, orgId: string | undefined): void {
