@@ -152,6 +152,28 @@ try {
     note(out.includes("Hello from stub"), "chat turn returns gateway completion")
   })
 
+  // 4b. Free-lane reasoning mapping: an effort-capable free model carries the
+  // max rung; a model without an effort surface carries nothing (harness).
+  // The free models resolve through the extension's own registration (unlike
+  // the bundled go lane), so this is its own wire proof.
+  for (const [label, model] of [
+    ["chat-free-effort", "space-bunny-free"],
+    ["chat-free-plain", "mimo-v2.6-flash-free"],
+  ]) {
+    await inTerminal(label, [], async (terminal, dump) => {
+      await terminal.run(OMP, ["run", "--print", "--no-title", `--model=opencode-free/${model}`, "hi"], {
+        env,
+        cwd: REPO,
+        cols: 140,
+        rows: 42,
+        timeout: 120_000,
+      })
+      await terminal.waitExit({ timeout: 90_000 }).catch(() => undefined)
+      const out = (await terminal.getOutput().catch(() => "")) ?? (await terminal.text({ full: true }))
+      if (!out.trim()) await dump()
+    })
+  }
+
   // 5. The wire carries the harness fingerprint.
   const requests = stubRequests()
   const device = requests.find((request) => request.url.endsWith("/auth/device/code"))
@@ -162,7 +184,10 @@ try {
   }
   const polls = requests.filter((request) => request.url.endsWith("/auth/device/token"))
   note(polls.length >= 3, `device token polled ${polls.length}x (pending → success)`)
-  const chat = requests.filter((request) => request.url.endsWith("/chat/completions")).at(-1)
+  // The Go-lane chat, not the free-lane chats added below (which omit `store`).
+  const chat = requests
+    .filter((request) => request.url.endsWith("/chat/completions") && request.url.includes("/go/"))
+    .at(-1)
   note(Boolean(chat), "chat hit POST /zen/go/v1/chat/completions")
   if (chat) {
     note(chat.headers["user-agent"] === "opencode/latest/2.0.26/cli", `chat UA ${chat.headers["user-agent"]}`)
@@ -181,6 +206,39 @@ try {
     note(
       body.stream === true && body.store === false && body.stream_options?.include_usage === true,
       "chat body: stream/store/stream_options match harness shape",
+    )
+    note(body.reasoning_effort === undefined, "go non-effort model carries no reasoning fields")
+  }
+
+  // Free-lane reasoning bodies (models resolved via the extension's own
+  // registration): the effort model carries its MAX rung, the rest stay clean.
+  const bodies = requests
+    .filter((request) => request.url.endsWith("/chat/completions"))
+    .map((request) => JSON.parse(request.body))
+  const freeEffort = bodies.find((body) => body.model === "space-bunny-free")
+  note(
+    freeEffort?.reasoning_effort === "max",
+    `free effort model carries reasoning_effort=max (got ${JSON.stringify(freeEffort?.reasoning_effort)})`,
+  )
+  const freePlain = bodies.find((body) => body.model === "mimo-v2.6-flash-free")
+  note(
+    freePlain !== undefined &&
+      freePlain.reasoning_effort === undefined &&
+      freePlain.reasoning === undefined,
+    "free non-effort model carries no reasoning fields",
+  )
+
+  // Free-lane tool surface: the keyless gateway fingerprints the request's
+  // `tools` array, so every free chat must carry exactly the harness's 12
+  // definitions (src/tool-mirror.ts). Compare against the captured asset so a
+  // drift fails here rather than as a live FreeTierError.
+  const harnessTools = JSON.parse(readFileSync(path.join(REPO, "capture", "harness-tools.json"), "utf8"))
+  const freeBodies = bodies.filter((body) => typeof body.model === "string" && body.model.endsWith("-free"))
+  note(freeBodies.length >= 2, `free-lane chat bodies captured (${freeBodies.length})`)
+  for (const body of freeBodies) {
+    note(
+      body.tools !== undefined && JSON.stringify(body.tools) === JSON.stringify(harnessTools),
+      `free body ${body.model} carries the exact 12-tool harness surface`,
     )
   }
 

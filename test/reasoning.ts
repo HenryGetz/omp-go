@@ -125,8 +125,8 @@ const compatOf = (model: { compat?: unknown } | undefined): OpenAICompatView | u
     )
     assert.match(yml, /"space-bunny-free":[\s\S]*?defaultLevel: max/, "free lane carries the same mapping")
     assert.ok(
-      yml.split("supportsReasoningEffort: false").length - 1 === 2,
-      "provider-level default stays false on both lanes",
+      yml.split("supportsReasoningEffort: false").length - 1 === 1,
+      "only the go provider pins a provider-level false; the free lane leaves it to the extension's per-model values",
     )
   } finally {
     if (previousHome === undefined) delete process.env.HOME

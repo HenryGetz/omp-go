@@ -75,7 +75,12 @@ function saveSnapshot(key: string, snapshot: ConsoleConfigSnapshot): void {
 
 export function providerOverride(orgId: string | undefined, providerID: string): ProviderOverride {
   const snapshot = loadSnapshot(orgId ?? "default")
-  const provider = snapshot?.providers[providerID]
+  // The Console names the free/zen lane "opencode" (the harness's provider
+  // id); we register it as "opencode-free". Missing the push means falling
+  // back to the wrong endpoint path, which the free gateway rejects with
+  // `FreeTierError` ("can only be used from within OpenCode").
+  const key = providerID === "opencode-free" ? "opencode" : providerID
+  const provider = snapshot?.providers[key]
   return {
     headers: provider?.headers ?? {},
     baseURL: provider?.settings?.baseURL,

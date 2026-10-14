@@ -165,6 +165,16 @@ always one of its own rungs.
   request head byte-for-byte as the harness does (`node:https`, `setHost:
   false`), because bun's fetch sorts headers and the free-tier gateway checks.
   Golden-trace parity against the real harness enforces the rest.
+- **Tool surface.** The free gateway also fingerprints the request's `tools`
+  array (a keyless `403 FreeTierError` otherwise). On `opencode-free` the
+  plugin sends the harness's own 12 tool definitions — captured from the real
+  binary in `capture/harness-tools.json` and installed verbatim by
+  `src/tool-mirror.ts` — and backs each name with a wrapper that carries the
+  harness schema and translates into omp's (`shell` runs through omp's shell
+  executor, `read`/`edit`/`glob`/`grep`/`write` delegate to the built-ins,
+  `webfetch`/`websearch`/`subagent`/`execute` have real implementations). The
+  `opencode-go` lane is untouched: its wrappers stay inactive and it keeps the
+  built-in schemas.
 
 Some catalog entries drift dead upstream without warning (right now:
 `exo-free` answers `410 ModelDeprecated`, `ling-3.0-flash-fin-free` is
@@ -187,13 +197,18 @@ shouts "wake" when a hidden model recovers upstream.
 - `bun test/transport.ts` pins the wire contract the free-tier gateway
   validates: header order/casing and the harness's descending session-id
   encoding.
+- `bun test/tool-mirror.ts` pins the harness tool surface: the asset is
+  byte-identical to the golden capture, the request rewrite installs exactly
+  those 12 definitions, and every wrapper carries the harness schema and
+  translates into omp's.
 - `bun test/proxy.ts` pins the egress pool: proxy parsing, round-robin
   failover, and the SOCKS5 tunnel handshake.
 - `bun test/gateway-sweep.ts` chats with every free model on the real gateway,
   on its correct protocol — the anti-"model does not support this protocol"
   sweep.
 - `bun test/gateway-free.ts` runs real `omp`, no login, `opencode-free/*`
-  against the real gateway — the user-visible scenario end to end. With
+  against the real gateway — the user-visible scenario end to end, including a
+  real `shell` tool call executed and returned in the model's reply. With
   `EGRESS_CONFIG=1` it also proves the plugin opens its own tunnels from the
   host list.
 - `bun test/e2e/user-flow.mjs` does the whole thing like a user:

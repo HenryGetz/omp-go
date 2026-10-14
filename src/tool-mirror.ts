@@ -1,0 +1,456 @@
+// Free-tier tool mirror.
+//
+// The keyless free gateway (https://opencode.ai/inference/openai/v1) rejects
+// traffic whose `tools` array does not fingerprint as the opencode harness's
+// own tool surface (403 FreeTierError). The gate rule, established by ablation
+// against the real gateway:
+//
+//   1. the EXACT harness definitions of `shell` AND `read` must both be present
+//      (byte-same name + description + parameters as the harness sends);
+//   2. every tool whose NAME is a harness-known name must carry that harness
+//      tool's EXACT definition (omp's own read/edit/glob/grep/write schemas are
+//      rejected — same names, different schemas);
+//   3. unknown-named tools are allowed with any schema;
+//   4. descriptions are fingerprint-checked (stripping them breaks the gate).
+//
+// So on the free lane the request's `tools` array is replaced, wholesale, by the
+// harness's own serialization captured in ../../capture/harness-tools.json. That
+// rewrite happens on the already-built provider payload (the host's
+// `before_provider_request` hook) so nothing downstream re-serializes or
+// normalizes the JSON Schema — the bytes stay the harness's.
+//
+// The model then calls harness names. `read`/`edit`/`glob`/`grep`/`write` are
+// omp built-ins, reachable unchanged; a `tool_call` shim translates the harness
+// argument shape into omp's. The seven harness-only names (shell, subagent,
+// execute, websearch, webfetch, question, skill) are registered as wrapper tools
+// with the harness's exact schemas + real behaviour. They are `defaultInactive`
+// and only activated on an `opencode-free` session, so the working `opencode-go`
+// lane's tool surface (and therefore its request bytes) is untouched.
+
+import { readFileSync } from "node:fs"
+import type {
+  ExtensionAPI,
+  ToolDefinition,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types"
+import type { AgentToolResult } from "@oh-my-pi/pi-agent-core"
+
+/** One entry of the OpenAI chat-completions `tools` array, as the harness sends it. */
+export type HarnessTool = {
+  type: "function"
+  function: {
+    name: string
+    description: string
+    parameters: Record<string, unknown>
+    strict?: boolean
+  }
+}
+
+const ASSET_URL = new URL("../capture/harness-tools.json", import.meta.url)
+
+/** The 12 harness tool definitions, byte-faithful to capture/golden-requests.ndjson. */
+export const HARNESS_TOOLS: readonly HarnessTool[] = JSON.parse(
+  readFileSync(ASSET_URL, "utf8"),
+) as HarnessTool[]
+
+export const HARNESS_TOOL_NAMES: readonly string[] = HARNESS_TOOLS.map((tool) => tool.function.name)
+
+/** Harness names with no same-named omp built-in: registered as real wrappers. */
+export const HARNESS_ONLY_NAMES: readonly string[] = [
+  "shell",
+  "subagent",
+  "execute",
+  "websearch",
+  "webfetch",
+  "question",
+  "skill",
+]
+
+/** Harness names that collide with an omp built-in: reached through the arg shim. */
+export const COLLIDING_NAMES: readonly string[] = ["read", "edit", "glob", "grep", "write"]
+
+/**
+ * JSON-Schema parameters for the wrapper tools. The `static` member is a
+ * type-level phantom only (never present at runtime): it makes pi-ai's
+ * `Static<TParams>` resolve to a plain argument record, so wrapper `execute`
+ * bodies read params without casting.
+ */
+type WrapperSchema = Record<string, unknown> & { static: Record<string, unknown> }
+
+const HARNESS_ONLY: Record<string, boolean> = Object.fromEntries(HARNESS_ONLY_NAMES.map((name) => [name, true]))
+
+const str = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined)
+const num = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) ? value : undefined)
+
+const text = (value: string): AgentToolResult<unknown> => ({ content: [{ type: "text", text: value }] })
+
+/** Whether a name is a harness-only wrapper this module registers. */
+export const isHarnessOnlyName = (name: string): boolean => HARNESS_ONLY[name] === true
+
+// --- Request-side rewrite ----------------------------------------------------
+
+/**
+ * Replace a built provider payload's `tools` array with the harness's exact 12.
+ * Returns the payload unchanged when it carries no tools (a tool-less turn —
+ * e.g. a title/compaction call — must not gain a tool surface it never had).
+ */
+export function rewriteFreeLanePayload(payload: unknown): unknown {
+  if (typeof payload !== "object" || payload === null || !("tools" in payload)) return payload
+  const tools = payload.tools
+  if (!Array.isArray(tools) || tools.length === 0) return payload
+  return { ...payload, tools: HARNESS_TOOLS.map((tool) => tool) }
+}
+
+/** True when a payload's `tools` array is the harness's exact 12, in order. */
+export function isHarnessToolPayload(payload: unknown): boolean {
+  if (typeof payload !== "object" || payload === null || !("tools" in payload)) return false
+  const tools = payload.tools
+  if (!Array.isArray(tools) || tools.length !== HARNESS_TOOLS.length) return false
+  return tools.every((tool, index) => {
+    if (typeof tool !== "object" || tool === null || !("function" in tool)) return false
+    const fn = tool.function
+    return typeof fn === "object" && fn !== null && "name" in fn && fn.name === HARNESS_TOOL_NAMES[index]
+  })
+}
+
+// --- Argument shim (harness shape -> omp built-in shape) ---------------------
+
+/** Append an omp read selector (`:N-M` / `:N-` / `:1-M`) when harness offset/limit are given. */
+function withReadSelector(path: string, offset: number | undefined, limit: number | undefined): string {
+  if (path.includes(":")) return path
+  const from = offset ?? 1
+  if (limit !== undefined) return `${path}:${from}-${from + Math.max(1, limit) - 1}`
+  if (offset !== undefined) return `${path}:${from}-`
+  return path
+}
+
+const REGEX_META = /[.*+?^${}()|[\]\\]/g
+
+/**
+ * Translate a harness-shaped argument object into the parameter object omp's
+ * built-in for the same name expects. Returns `undefined` when the call does
+ * not look harness-shaped (an already-omp-shaped call is left alone).
+ */
+export function toOmpParams(name: string, input: Record<string, unknown>): Record<string, unknown> | undefined {
+  switch (name) {
+    case "read": {
+      if (typeof input.i === "string") return undefined
+      const path = str(input.path)
+      if (path === undefined) return undefined
+      return { path: withReadSelector(path, num(input.offset), num(input.limit)) }
+    }
+    case "edit": {
+      if (str(input.oldString) === undefined) return undefined
+      const translated: Record<string, unknown> = {
+        path: input.path,
+        old_string: input.oldString,
+        new_string: input.newString,
+      }
+      if (typeof input.replaceAll === "boolean") translated.replace_all = input.replaceAll
+      return translated
+    }
+    case "glob": {
+      const pattern = str(input.pattern)
+      if (pattern === undefined) return undefined
+      const root = str(input.path)
+      const combined = root && !pattern.startsWith("/") ? `${root.replace(/\/+$/, "")}/${pattern}` : pattern
+      const translated: Record<string, unknown> = { path: combined }
+      if (typeof input.hidden === "boolean") translated.hidden = input.hidden
+      if (num(input.limit) !== undefined) translated.limit = input.limit
+      return translated
+    }
+    case "grep": {
+      const pattern = str(input.pattern)
+      if (pattern === undefined) return undefined
+      // omp grep has no literal flag: escape the pattern when the harness asked
+      // for a substring match. `include`/`limit` have no omp equivalent.
+      const translated: Record<string, unknown> = {
+        pattern: input.literal === true ? pattern.replace(REGEX_META, "\\$&") : pattern,
+      }
+      if (str(input.path) !== undefined) translated.path = input.path
+      if (typeof input.caseSensitive === "boolean") translated.case = input.caseSensitive
+      return translated
+    }
+    case "write": {
+      if (typeof input.i === "string") return undefined
+      return { path: input.path, content: input.content }
+    }
+    default:
+      return undefined
+  }
+}
+
+// --- Wrapper tools -----------------------------------------------------------
+
+function harnessDefinition(name: string): HarnessTool["function"] {
+  const tool = HARNESS_TOOLS.find((entry) => entry.function.name === name)
+  if (!tool) throw new Error(`tool-mirror: no harness definition for "${name}"`)
+  return tool.function
+}
+
+const decodeEntities = (html: string): string =>
+  html
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#(\d+);/g, (_match, code: string) => String.fromCharCode(Number(code)))
+
+/** Minimal, real HTML→markdown: headings, links, lists, code blocks. */
+export function htmlToMarkdown(html: string): string {
+  let out = html
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<!--[\s\S]*?-->/g, "")
+  out = out.replace(/<pre[^>]*>([\s\S]*?)<\/pre>/gi, (_m, body: string) => `\n\`\`\`\n${decodeEntities(body.replace(/<[^>]+>/g, ""))}\n\`\`\`\n`)
+  out = out.replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, (_m, body: string) => `\`${decodeEntities(body.replace(/<[^>]+>/g, ""))}\``)
+  out = out.replace(/<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi, (_m, level: string, body: string) => `\n${"#".repeat(Number(level))} ${decodeEntities(body.replace(/<[^>]+>/g, "")).trim()}\n`)
+  out = out.replace(/<li[^>]*>([\s\S]*?)<\/li>/gi, (_m, body: string) => `\n- ${decodeEntities(body.replace(/<[^>]+>/g, "")).trim()}`)
+  out = out.replace(/<a\b[^>]*href\s*=\s*"([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, (_m, href: string, body: string) => `[${decodeEntities(body.replace(/<[^>]+>/g, "")).trim()}](${href})`)
+  out = out.replace(/<\/(p|div|section|article|li|ul|ol|tr|table)>/gi, "\n")
+  out = out.replace(/<br\s*\/?>/gi, "\n")
+  out = out.replace(/<[^>]+>/g, "")
+  return decodeEntities(out)
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+}
+
+function htmlToText(html: string): string {
+  return decodeEntities(
+    html
+      .replace(/<script[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[\s\S]*?<\/style>/gi, "")
+      .replace(/<[^>]+>/g, " "),
+  )
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+}
+
+async function runWebfetch(params: Record<string, unknown>, signal: AbortSignal | undefined): Promise<string> {
+  const url = str(params.url)
+  if (!url) throw new Error("webfetch: `url` is required")
+  const format = str(params.format) ?? "markdown"
+  const seconds = num(params.timeout)
+  const timeoutMs = seconds !== undefined && seconds > 0 ? Math.min(seconds, 120) * 1000 : 30_000
+  const timeoutSignal = AbortSignal.timeout(timeoutMs)
+  const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+  const response = await fetch(url, { signal: combined, headers: { accept: "text/html,application/xhtml+xml,text/plain,*/*" } })
+  const body = await response.text()
+  const header = `HTTP ${response.status}${response.url && response.url !== url ? ` (${response.url})` : ""}`
+  if (format === "html") return `${header}\n\n${body}`
+  if (format === "text" || !/html/i.test(response.headers.get("content-type") ?? "")) return `${header}\n\n${htmlToText(body)}`
+  return `${header}\n\n${htmlToMarkdown(body)}`
+}
+
+async function runWebsearch(params: Record<string, unknown>, signal: AbortSignal | undefined): Promise<string> {
+  const query = str(params.query)
+  if (!query) throw new Error("websearch: `query` is required")
+  const url = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`
+  const timeoutSignal = AbortSignal.timeout(20_000)
+  const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+  const response = await fetch(url, { signal: combined, headers: { accept: "text/html", "user-agent": "Mozilla/5.0" } })
+  const html = await response.text()
+  const results: string[] = []
+  const linkRe = /<a[^>]*class="result-link"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi
+  const snippetRe = /<td[^>]*class="result-snippet"[^>]*>([\s\S]*?)<\/td>/gi
+  const links = [...html.matchAll(linkRe)]
+  const snippets = [...html.matchAll(snippetRe)]
+  for (const [index, match] of links.entries()) {
+    const href = decodeEntities(match[1] ?? "")
+    const title = decodeEntities((match[2] ?? "").replace(/<[^>]+>/g, "")).trim()
+    const snippet = decodeEntities((snippets[index]?.[1] ?? "").replace(/<[^>]+>/g, "")).trim()
+    if (!title) continue
+    results.push(`${index + 1}. ${title}\n   ${href}${snippet ? `\n   ${snippet}` : ""}`)
+  }
+  if (results.length === 0) {
+    const fallback = htmlToText(html).slice(0, 4000)
+    return `Web search for ${JSON.stringify(query)} returned no parsed results (HTTP ${response.status}).\n\n${fallback}`
+  }
+  return `Web search results for ${JSON.stringify(query)}:\n\n${results.join("\n\n")}`
+}
+
+function baseDefinition(name: string, label: string): Omit<ToolDefinition<WrapperSchema, unknown>, "execute"> {
+  const definition = harnessDefinition(name)
+  return {
+    name,
+    label,
+    description: definition.description,
+    // Type-level only: the phantom `static` member makes `Static<WrapperSchema>`
+    // a plain argument record; at runtime this is the harness's JSON Schema.
+    parameters: definition.parameters as WrapperSchema,
+    strict: false,
+    defaultInactive: true,
+    loadMode: "discoverable",
+    approval: name === "question" || name === "skill" ? "read" : "exec",
+  }
+}
+
+function makeWrappers(pi: ExtensionAPI): ToolDefinition<WrapperSchema, unknown>[] {
+  const shell: ToolDefinition<WrapperSchema, unknown> = {
+    ...baseDefinition("shell", "Shell"),
+    execute: async (_id, params, signal, _onUpdate, ctx) => {
+      const command = str(params.command)
+      if (!command) throw new Error("shell: `command` is required")
+      const workdir = str(params.workdir) ?? ctx.cwd
+      const timeout = num(params.timeout)
+      const result = await pi.exec("bash", ["-c", command], {
+        cwd: workdir,
+        signal,
+        timeout: timeout !== undefined && timeout > 0 ? timeout : undefined,
+      })
+      const output = [result.stdout, result.stderr].filter((part) => part.trim().length > 0).join("\n").trim()
+      const status = `exit ${result.code}${result.killed ? " (killed)" : ""}`
+      const note = params.background === true ? "\n\n[note] background execution is not available on this lane; ran in the foreground." : ""
+      return text(`${output || "(no output)"}\n\n${status}${note}`)
+    },
+  }
+
+  const execute: ToolDefinition<WrapperSchema, unknown> = {
+    ...baseDefinition("execute", "Execute"),
+    execute: async (_id, params, signal, _onUpdate, ctx) => {
+      const code = str(params.code)
+      if (!code) throw new Error("execute: `code` is required")
+      const runtime = process.versions.bun ? "bun" : process.execPath
+      const args = runtime === "bun" ? ["-e", code] : ["--input-type=module", "-e", code]
+      const result = await pi.exec(runtime, args, { cwd: ctx.cwd, signal })
+      const output = [result.stdout, result.stderr].filter((part) => part.trim().length > 0).join("\n").trim()
+      return text(`${output || "(no output)"}\n\nexit ${result.code}`)
+    },
+  }
+
+  const subagent: ToolDefinition<WrapperSchema, unknown> = {
+    ...baseDefinition("subagent", "Subagent"),
+    execute: async (_id, params, signal, _onUpdate, ctx) => {
+      const prompt = str(params.prompt)
+      if (!prompt) throw new Error("subagent: `prompt` is required")
+      const agent = str(params.agent)
+      const description = str(params.description)
+      const model = str(params.model)
+      const args = ["run", "--print", "--no-title"]
+      if (model) args.push(`--model=${model}`)
+      args.push(prompt)
+      const result = await pi.exec(process.env.OMP_BIN ?? "omp", args, { cwd: ctx.cwd, signal, timeout: 600_000 })
+      const output = [result.stdout, result.stderr].filter((part) => part.trim().length > 0).join("\n").trim()
+      const header = [agent ? `agent: ${agent}` : undefined, description ? `task: ${description}` : undefined].filter(Boolean).join(", ")
+      if (result.code !== 0 && output.length === 0) throw new Error(`subagent: child exited ${result.code}`)
+      return text(`${header ? `${header}\n\n` : ""}${output}`)
+    },
+  }
+
+  const webfetch: ToolDefinition<WrapperSchema, unknown> = {
+    ...baseDefinition("webfetch", "Web Fetch"),
+    execute: async (_id, params, signal) => text(await runWebfetch(params, signal)),
+  }
+
+  const websearch: ToolDefinition<WrapperSchema, unknown> = {
+    ...baseDefinition("websearch", "Web Search"),
+    execute: async (_id, params, signal) => text(await runWebsearch(params, signal)),
+  }
+
+  const question: ToolDefinition<WrapperSchema, unknown> = {
+    ...baseDefinition("question", "Question"),
+    execute: async (_id, params) => {
+      const entries: unknown[] = Array.isArray(params.questions) ? params.questions : []
+      const rendered = entries
+        .map((entry, index) => {
+          if (typeof entry !== "object" || entry === null) return `${index + 1}. ${String(entry)}`
+          const header = "header" in entry && typeof entry.header === "string" ? entry.header : `Question ${index + 1}`
+          const body = "question" in entry && typeof entry.question === "string" ? entry.question : ""
+          const rawOptions = "options" in entry && Array.isArray(entry.options) ? entry.options : []
+          const options = rawOptions
+            .map((option) => {
+              if (typeof option !== "object" || option === null) return `   - ${String(option)}`
+              const label = "label" in option && typeof option.label === "string" ? option.label : ""
+              const description = "description" in option && typeof option.description === "string" ? option.description : ""
+              return `   - ${label}: ${description}`
+            })
+            .join("\n")
+          return `${index + 1}. ${header}\n   ${body}${options ? `\n${options}` : ""}`
+        })
+        .join("\n\n")
+      return text(
+        `No interactive user is available on this lane, so the question tool cannot prompt.\n\n${rendered}\n\nProceed with your best judgement, stating the assumption you made.`,
+      )
+    },
+  }
+
+  const skill: ToolDefinition<WrapperSchema, unknown> = {
+    ...baseDefinition("skill", "Skill"),
+    execute: async (_id, params) => {
+      const id = str(params.id) ?? "(unknown)"
+      return text(
+        `Skills cannot be loaded on this lane (skill:// resources are not mounted here). Requested skill: ${id}. Use read/grep to inspect repository skill files instead.`,
+      )
+    },
+  }
+
+  return [shell, subagent, execute, websearch, webfetch, question, skill]
+}
+
+/**
+ * Wrappers for the five harness names that collide with an omp built-in. They
+ * carry the harness's exact schema and translate the call into omp's shape,
+ * then delegate to the native built-in through `ctx.invokeTool` (same-name
+ * delegation). Registered only on a free-lane session so the Go lane keeps the
+ * built-ins' own schemas.
+ */
+function makeCollidingWrappers(): ToolDefinition<WrapperSchema, unknown>[] {
+  return COLLIDING_NAMES.map((name) => ({
+    ...baseDefinition(name, name === "read" ? "Read" : name === "write" ? "Write" : name[0].toUpperCase() + name.slice(1)),
+    execute: async (_id, params, signal, onUpdate, ctx) => {
+      const ompParams = toOmpParams(name, params)
+      if (ompParams === undefined) throw new Error(`${name}: unrecognized harness arguments`)
+      if (!ctx.invokeTool) throw new Error(`${name}: native delegate unavailable`)
+      return ctx.invokeTool(ompParams, { signal, onUpdate })
+    },
+  }))
+}
+
+/**
+ * Register the five colliding-name wrappers. Call on a free-lane session only:
+ * they intentionally re-register the omp built-ins, so a Go-lane session must
+ * never see them.
+ */
+export function registerCollidingHarnessTools(pi: ExtensionAPI): void {
+  for (const wrapper of makeCollidingWrappers()) pi.registerTool(wrapper)
+}
+
+/**
+ * Register the seven harness-only wrapper tools. They are `defaultInactive`
+ * (invisible on the `opencode-go` lane) and activated for `opencode-free`
+ * sessions by {@link activateHarnessTools}.
+ */
+export function registerHarnessTools(pi: ExtensionAPI): void {
+  for (const wrapper of makeWrappers(pi)) pi.registerTool(wrapper)
+}
+
+/**
+ * Activate the harness wrappers when the session runs the free lane.
+ * `includeColliding` must be true only after {@link registerCollidingHarnessTools}
+ * has run, so the colliding names resolve to the wrappers rather than the
+ * built-ins.
+ */
+export async function activateHarnessTools(
+  pi: ExtensionAPI,
+  provider: string | undefined,
+  includeColliding = false,
+): Promise<boolean> {
+  if (provider !== "opencode-free") return false
+  const active = pi.getActiveTools()
+  // Never clobber an empty snapshot into a wrapper-only set: wait until the
+  // session's built-in tool surface is established.
+  if (active.length === 0) return false
+  const wanted = includeColliding ? HARNESS_TOOL_NAMES : HARNESS_ONLY_NAMES
+  const missing = wanted.filter((name) => !active.includes(name))
+  if (missing.length === 0) return false
+  await pi.setActiveTools([...active, ...missing])
+  return true
+}
+
+/** Test seam: the harness definitions as a name→function record. */
+export const HARNESS_DEFINITIONS: Readonly<Record<string, HarnessTool["function"]>> = Object.fromEntries(
+  HARNESS_TOOLS.map((tool) => [tool.function.name, tool.function]),
+)

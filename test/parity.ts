@@ -12,7 +12,8 @@
 // Run: bun test/parity.ts
 
 import { spawn, type ChildProcess } from "node:child_process"
-import { readFileSync } from "node:fs"
+import { readFileSync, rmSync } from "node:fs"
+import { homedir } from "node:os"
 import { fileURLToPath } from "node:url"
 import path from "node:path"
 import type { ExtensionAPI, ProviderConfig } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types"
@@ -167,9 +168,6 @@ async function main(): Promise<number> {
   // The Console-config cache persists per profile with a 60s TTL; clear it so
   // the login-time config fetch is always exercised (the golden trace has it).
   try {
-    const { rmSync } = await import("node:fs")
-    const { homedir } = await import("node:os")
-    const path = await import("node:path")
     rmSync(path.join(homedir(), ".omp", "agent", "omp-go-console-config.json"), { force: true })
   } catch {}
   const stub = await startStub()
@@ -242,6 +240,8 @@ async function main(): Promise<number> {
     // including "built-in API names are reserved", runs here too. A config that
     // crashes omp startup fails this test instead.
     const registered = new Map<string, ProviderConfig>()
+    const registeredTools = new Map<string, { name: string; description: string }>()
+    let activeTools = ["read", "edit", "glob", "grep", "write"]
     const fakePi = {
       registerProvider: (name: string, config: ProviderConfig) => {
         registered.set(name, config)
@@ -252,6 +252,13 @@ async function main(): Promise<number> {
           )
         }
         if (config.oauth) registerOAuthProvider({ ...config.oauth, id: name, sourceId: "parity-test" })
+      },
+      registerTool: (tool: { name: string; description: string }) => {
+        registeredTools.set(tool.name, { name: tool.name, description: tool.description })
+      },
+      getActiveTools: () => [...activeTools],
+      setActiveTools: (names: string[]) => {
+        activeTools = [...names]
       },
       on: () => undefined,
     } as unknown as ExtensionAPI
@@ -375,6 +382,12 @@ async function main(): Promise<number> {
     return 0
   } finally {
     stub.kill()
+    // The login flow persists the stub Console-config snapshot into the profile.
+    // Left behind, it points a later real-gateway free-lane run at this dead
+    // stub; drop it so the next run falls back to the catalog endpoints.
+    try {
+      rmSync(path.join(homedir(), ".omp", "agent", "omp-go-console-config.json"), { force: true })
+    } catch {}
   }
 }
 

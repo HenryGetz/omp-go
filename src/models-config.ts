@@ -34,13 +34,15 @@ import {
 
 const BEGIN = "# >>> omp-go managed block (do not edit) >>>"
 const END = "# <<< omp-go managed block <<<"
-// Provider-level body compat. `supportsReasoningEffort` stays false as the
-// SAFE default: models without a catalog effort surface must carry no
-// reasoning fields (the harness sends none). Effort-capable models flip it
-// back on per model via `modelOverrides` (which out-rank this level) and pin
-// their ladder + MAX default there — see `thinkingOverrides`.
+// Provider-level body compat. `supportsReasoningEffort` is deliberately NOT
+// set here: the free lane's models come from the extension's own registration
+// (src/models.ts), which carries the correct PER-MODEL value (true for
+// catalog effort models with their max default; false otherwise). A
+// provider-level key would out-rank it (mergeCompat: provider wins), and the
+// `modelOverrides` that rescue the go lane do not reach extension-registered
+// models. `supportsStore` differs per lane (golden captures).
 const HARNESS_BODY_COMPAT = ["supportsReasoningEffort: false", "supportsStore: true"]
-const FREE_BODY_COMPAT = ["supportsReasoningEffort: false", "supportsStore: false"]
+const FREE_BODY_COMPAT = ["supportsStore: false"]
 const PROVIDERS = [
   {
     id: "opencode-go",

@@ -40,6 +40,12 @@ import { OpencodeOAuthProvider, orgForToken } from "./opencode-provider"
 import { catalogModels, fetchCatalogModels, fetchFreeModels, freeModels, usesResponsesAPI } from "./models"
 import { OPENCODE_GO_PROVIDER, opencodeGoUsageProvider } from "./usage"
 import {
+  activateHarnessTools,
+  registerCollidingHarnessTools,
+  registerHarnessTools,
+  rewriteFreeLanePayload,
+} from "./tool-mirror"
+import {
   CONSOLE_BASE,
   DEFAULT_IDENTITY,
   projectID,
@@ -271,6 +277,34 @@ export function registerOpencodeGo(
   writeModelsOverride({ identity })
   pi.registerProvider(OPENCODE_GO_PROVIDER, goConfig)
   pi.registerProvider(FREE_PROVIDER, freeConfig)
+
+  // Free-tier tool mirror (src/tool-mirror.ts): the keyless gateway fingerprints
+  // the `tools` array. Wrapper tools carry the harness's exact schemas and real
+  // behaviour; they stay inactive on the Go lane so its traffic is unchanged and
+  // are switched on for an `opencode-free` session.
+  registerHarnessTools(pi)
+  let collidingRegistered = false
+  const ensureHarnessTools = (ctx: { model?: Model<Api> }): void => {
+    void (async () => {
+      const provider = ctx.model?.provider
+      if (provider !== FREE_PROVIDER) return
+      // The colliding wrappers re-register omp's read/edit/glob/grep/write, so
+      // this runs only on a free-lane session — the Go lane keeps the built-ins.
+      if (!collidingRegistered) {
+        registerCollidingHarnessTools(pi)
+        collidingRegistered = true
+      }
+      await activateHarnessTools(pi, provider)
+    })().catch(() => undefined)
+  }
+  pi.on("session_start", (_event, ctx) => ensureHarnessTools(ctx))
+  pi.on("before_agent_start", (_event, ctx) => ensureHarnessTools(ctx))
+  // The free lane's built payload carries the harness's own `tools` array; the
+  // Go lane keeps whatever omp built.
+  pi.on("before_provider_request", (event, ctx) => {
+    if (ctx.model?.provider !== FREE_PROVIDER) return undefined
+    return rewriteFreeLanePayload(event.payload)
+  })
 
   return oauth
 }
