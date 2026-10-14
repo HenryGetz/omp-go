@@ -42,7 +42,9 @@ writeFileSync(
 )
 
 const stub = spawn("node", [path.join(REPO, "capture", "stub-console.mjs")], {
-  env: { ...env, STUB_LOG: stubLog, STUB_PORT: String(PORT) },
+  // Gate deepseek for account 1: cache-strategic routing pins new sessions to
+  // it first, so the region error must fire there for the rotation scenario.
+  env: { ...env, STUB_LOG: stubLog, STUB_PORT: String(PORT), STUB_REGION_GATED_ACCOUNT: "1" },
   stdio: ["ignore", "pipe", "inherit"],
 })
 await new Promise((resolve, reject) => {
@@ -146,6 +148,10 @@ try {
   console.log(`info  region-gated turn output: ${JSON.stringify(gated.trim().slice(-160))}`)
   const open = await chat("open", "mimo-v2.6-pro")
   console.log(`info  ungated turn output: ${JSON.stringify(open.trim().slice(-160))}`)
+  // Protocol-true Responses model (gpt-6-luna): its reasoning rides
+  // `reasoning: {effort, summary:"auto"}` + the encrypted-reasoning include.
+  const luna = await chat("luna", "gpt-6-luna")
+  console.log(`info  responses turn output: ${JSON.stringify(luna.trim().slice(-120))}`)
 
   // 4. Pool coverage + config-driven routing: the Console config pushes the
   // /inference/go/... endpoint and per-org header, so chats land at the stub
@@ -186,6 +192,36 @@ try {
   note(
     !crossPaired && new Set(orgsUsed).size === orgsUsed.length,
     `org attribution never cross-paired (${[...tokenOrg].map(([b, o]) => `${b.slice(-10)}->${o}`).join(", ") || "no orgs on this lane"})`,
+  )
+
+  // Reasoning mapping (src/models.ts): effort-capable models carry the model's
+  // MAX rung explicitly (the harness's default variant is the lightest —
+  // `effort · low` in the Console); models without an effort surface carry no
+  // reasoning fields at all; Responses models use the harness's
+  // `reasoning: {effort, summary:"auto"}` + encrypted-reasoning include shape.
+  const bodies = requests.map((request) => {
+    try {
+      return JSON.parse(request.body)
+    } catch {
+      return {}
+    }
+  })
+  const deepseekBody = bodies.find((body) => body.model === "deepseek-v4.1-flash")
+  const mimoBody = bodies.find((body) => body.model === "mimo-v2.6-pro")
+  const lunaBody = bodies.find((body) => body.model === "gpt-6-luna")
+  note(
+    deepseekBody?.reasoning_effort === "max",
+    `deepseek carries reasoning_effort=max (got ${JSON.stringify(deepseekBody?.reasoning_effort)})`,
+  )
+  note(
+    mimoBody?.reasoning_effort === undefined && mimoBody?.reasoning === undefined,
+    "mimo (no effort surface) carries no reasoning fields",
+  )
+  note(
+    lunaBody?.reasoning?.effort === "max" &&
+      lunaBody?.reasoning?.summary === "auto" &&
+      (lunaBody?.include ?? []).includes("reasoning.encrypted_content"),
+    `responses model carries reasoning {effort:${JSON.stringify(lunaBody?.reasoning?.effort)}, summary:${JSON.stringify(lunaBody?.reasoning?.summary)}} + include`,
   )
 
   const usageBearers = [

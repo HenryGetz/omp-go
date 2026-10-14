@@ -31,6 +31,7 @@ import type {
 } from "@oh-my-pi/pi-ai"
 import { accountVerdict, VERDICT_TTL_MS } from "./verdicts"
 import { indexTokenOrg } from "./opencode-provider"
+import { noteUsageOrg } from "./routing"
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error"
 import { sessionHeaders, type HarnessIdentity, type SessionIdentity } from "./wire"
 
@@ -175,6 +176,12 @@ export function opencodeGoUsageProvider(options: OpencodeGoUsageOptions): UsageP
         const limit = windowLimit(descriptor, windows[descriptor.key])
         return limit ? [limit] : []
       })
+      // Feed the cache-strategic router (src/routing.ts): the spill decision
+      // follows the account's worst window, monthly included.
+      noteUsageOrg(
+        params.credential.orgId,
+        limits.reduce((worst, limit) => Math.max(worst, limit.amount.usedFraction ?? 0), 0),
+      )
       return {
         provider: OPENCODE_GO_PROVIDER,
         fetchedAt: Date.now(),

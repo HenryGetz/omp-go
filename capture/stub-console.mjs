@@ -24,6 +24,26 @@ function tokenAccountNumber(value) {
   return n >= 100 ? n - 100 : n
 }
 
+// Per-account usage windows for routing tests. Seeded from
+// STUB_USAGE_BY_ACCOUNT='{"1":{"weekly":95}}' and mutable at runtime via
+// POST /control/usage {"account":1,"weekly":95}; missing windows keep the
+// defaults below (rolling 42 / weekly 85 / monthly 12).
+const usageOverrides = JSON.parse(process.env.STUB_USAGE_BY_ACCOUNT ?? "{}")
+
+// Which account's workspace is not Global (deepseek gated). Account 1 by
+// request via STUB_REGION_GATED_ACCOUNT; defaults to account 2 as ever.
+const regionGatedOrgId = () => accountFor(Number(process.env.STUB_REGION_GATED_ACCOUNT ?? 2)).orgId
+
+function usageFor(req) {
+  const auth = String(req.headers.authorization ?? "").replace(/^Bearer\s+/i, "")
+  const overrides = usageOverrides[String(tokenAccountNumber(auth))] ?? {}
+  return {
+    rolling: { percent: overrides.rolling ?? 42, status: "ok", resetsAt: "2026-10-12T20:00:00.000Z" },
+    weekly: { percent: overrides.weekly ?? 85, status: "ok", resetsAt: "2026-10-15T00:00:00.000Z" },
+    monthly: { percent: overrides.monthly ?? 12, status: "ok", resetsAt: "2026-11-01T00:00:00.000Z" },
+  }
+}
+
 function record(req, body) {
   const entry = {
     time: new Date().toISOString(),
@@ -120,11 +140,12 @@ createServer((req, res) => {
       ["/zen/go/v1/chat/completions", "/inference/go/openai/v1/chat/completions", "/zen/v1/chat/completions", "/inference/v1/chat/completions", "/inference/openai/v1/chat/completions"].includes(p)
     ) {
       const payload = JSON.parse(body || "{}")
-      // Region gate: workspaces of accounts 2+ are not Global; the gateway
-      // refuses Go region-gated models for them (mirrors the live 400).
+      // Region gate: the gated account's workspace is not Global (see
+      // STUB_REGION_GATED_ACCOUNT); the gateway refuses Go region-gated models
+      // for it (mirrors the live 400).
       const acct = accountFor(tokenAccountNumber(req.headers.authorization))
       const org = req.headers["x-opencode-org-id"]
-      if (accountSeq >= 2 && org === accountFor(2).orgId && /deepseek/.test(String(payload.model)))
+      if (accountSeq >= 2 && org === regionGatedOrgId() && /deepseek/.test(String(payload.model)))
         return send(res, 400, {
           error: {
             type: "server_error",
@@ -156,22 +177,34 @@ createServer((req, res) => {
       res.write("data: [DONE]\n\n")
       return res.end()
     }
+    if (req.method === "POST" && p === "/control/usage") {
+      const patch = JSON.parse(body)
+      const account = String(patch.account ?? "")
+      usageOverrides[account] = { ...(usageOverrides[account] ?? {}) }
+      for (const key of ["rolling", "weekly", "monthly"])
+        if (typeof patch[key] === "number") usageOverrides[account][key] = patch[key]
+      return send(res, 200, { ok: true, account, usage: usageOverrides[account] })
+    }
     if (req.method === "GET" && (p === "/zen/go/v1/usage" || p === "/inference/go/openai/v1/usage" || p === "/zen/v1/usage" || p === "/inference/openai/v1/usage"))
-      return send(res, 200, {
-        usage: {
-          rolling: { percent: 42, status: "ok", resetsAt: "2026-10-12T20:00:00.000Z" },
-          weekly: { percent: 85, status: "ok", resetsAt: "2026-10-15T00:00:00.000Z" },
-          monthly: { percent: 12, status: "ok", resetsAt: "2026-11-01T00:00:00.000Z" },
-        },
-      })
+      return send(res, 200, { usage: usageFor(req) })
     if (req.method === "GET" && p === "/zen/go/v1/usage-unused")
-      return send(res, 200, {
-        usage: {
-          rolling: { percent: 42, status: "ok", resetsAt: "2026-10-12T20:00:00.000Z" },
-          weekly: { percent: 85, status: "ok", resetsAt: "2026-10-15T00:00:00.000Z" },
-          monthly: { percent: 12, status: "ok", resetsAt: "2026-11-01T00:00:00.000Z" },
-        },
-      })
+      return send(res, 200, { usage: usageFor(req) })
+    if (req.method === "POST" && p.endsWith("/responses")) {
+      // Minimal Responses-API SSE so protocol-true models (gpt-6-*) complete a
+      // turn here; the request body is what the routing/reasoning asserts read.
+      res.writeHead(200, { "content-type": "text/event-stream" })
+      const item = { id: "msg_stub_1", type: "message", role: "assistant", content: [{ type: "output_text", text: "Hello from stub" }] }
+      for (const event of [
+        { type: "response.created", response: { id: "resp_stub_1", object: "response", status: "in_progress" } },
+        { type: "response.output_item.added", output_index: 0, item: { id: "msg_stub_1", type: "message", role: "assistant", content: [] } },
+        { type: "response.output_text.delta", item_id: "msg_stub_1", output_index: 0, content_index: 0, delta: "Hello from stub" },
+        { type: "response.output_text.done", item_id: "msg_stub_1", output_index: 0, content_index: 0, text: "Hello from stub" },
+        { type: "response.output_item.done", output_index: 0, item },
+        { type: "response.completed", response: { id: "resp_stub_1", object: "response", status: "completed", output: [item] } },
+      ])
+        res.write(`data: ${JSON.stringify(event)}\n\n`)
+      return res.end()
+    }
     return send(res, 404, { error: "not_found", path: p })
   })
 }).listen(PORT, "127.0.0.1", () => console.log(`stub console listening on http://127.0.0.1:${PORT}/console`))

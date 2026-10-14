@@ -5,6 +5,7 @@
 
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types"
 import { registerOpencodeGo, sessionIdentity } from "./register"
+import { pinNewSession } from "./routing"
 import { trafficReport } from "./traffic"
 import {
   addEgressFlow,
@@ -26,6 +27,21 @@ export * from "./register"
 
 export default function opencodeAuthExtension(pi: ExtensionAPI): void {
   registerOpencodeGo(pi)
+  // Cache-strategic account routing (src/routing.ts): pin every fresh session
+  // to the warm leader before its first prompt reaches a provider — the host
+  // awaits `session_start`, so the pin lands ahead of credential selection.
+  // Resumed sessions keep their existing pin (drain-in-place); any failure
+  // falls back to omp's default ranking.
+  const routingPinned = new Set<string>()
+  pi.on("session_start", (_event, ctx) => {
+    const sessionId = ctx.sessionManager.getSessionId()
+    if (!sessionId || routingPinned.has(sessionId)) return
+    routingPinned.add(sessionId)
+    return pinNewSession(pi, sessionId).then(
+      () => undefined,
+      () => undefined,
+    )
+  })
   pi.registerCommand("egress", {
     description:
       "Route free-tier traffic through your own machines — /egress [add <ssh-target>|remove <ssh-target>|on|off <ssh-target>|test|traffic|list]",

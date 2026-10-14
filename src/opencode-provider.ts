@@ -31,6 +31,7 @@ import {
 } from "@oh-my-pi/pi-ai/registry/oauth"
 import { refreshConsoleConfig } from "./console-config"
 import { writeModelsOverride } from "./models-config"
+import { noteServedOrg } from "./routing"
 import { providerOverride } from "./console-config"
 import {
   CONSOLE_BASE,
@@ -288,6 +289,9 @@ export class OpencodeOAuthProvider implements OAuthProviderInterface {
   /** The Go gateway accepts the Console access token directly as a bearer key; no exchange exists. */
   getApiKey(credentials: OAuthCredentials): string {
     indexTokenOrg(credentials.access, (credentials as { orgId?: string }).orgId)
+    // Serving point for every request lane: warm-cache routing (src/routing.ts)
+    // learns "who served last" here.
+    noteServedOrg((credentials as { orgId?: string }).orgId)
     return credentials.access
   }
 

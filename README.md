@@ -92,6 +92,52 @@ That is also how the tests prove traffic went through your tunnels and not
 around them. For the Go subscription, `omp usage` still shows the real 5h /
 weekly / monthly windows.
 
+## Account routing (multi-account, cache-first)
+
+Prompt caching is per account: every request that lands where the prompt-cache
+prefix is cold pays full input price, so a pool that hops accounts per chat can
+cost several times more than one that consolidates. With two or more
+`opencode-go` logins the plugin routes for cache:
+
+| situation | a **new** session starts on | **live** sessions |
+| --- | --- | --- |
+| leader has headroom | the warm leader (whichever account served last) | stay pinned |
+| leader ≥ 90% used | the sibling (spill) | the leader drains — its cache is warm there |
+| every account ≥ 90% used | the warm leader ("at that point it doesn't matter") | stay pinned |
+| the pinned account fails | healthy sibling (rotation) | rotate with it |
+
+The pin is made through omp's own auth API as an *explicit* pin: usage
+ranking and account reserve never evict it (that is what makes "drain" real),
+while hard failures and auth retries still route around it. Warmth and usage
+state persist in `~/.omp/agent/omp-go-routing.json` so every omp process
+agrees on the leader. The spill threshold reads the worst reported window
+(5h, weekly, or monthly) and is tunable via `OMP_GO_SPILL_PCT` (default 90).
+
+## Reasoning
+
+Every model's reasoning surface comes from the catalog's own
+`reasoning_options`, and the wire shape is the harness's (`variant.ts`):
+
+| catalog surface | wire |
+| --- | --- |
+| `effort` (chat models) | `reasoning_effort: <level>` |
+| `effort` (Responses models) | `reasoning: {effort, summary:"auto"}` + `include: ["reasoning.encrypted_content"]` |
+| `toggle` / `budget_tokens` only | nothing — the harness sends nothing either |
+
+The default effort is each model's **highest** rung (`max` for
+deepseek-v4.1-flash, `xhigh` for gpt-5.4-pro, …). The harness's own default
+variant is its lightest (`values[0]`), which is why Console requests read
+`effort · low` — this is the one deliberate divergence from harness-default
+traffic: same dialect, quality-maxed default. Any explicit reasoning level in
+omp overrides it.
+
+Mechanically this rides the plugin's managed `models.yml` block: every
+effort-capable model gets a `modelOverrides` entry pinning its ladder,
+`defaultLevel: max`, and `supportsReasoningEffort: true`, out-ranking the
+provider-level `supportsReasoningEffort: false` that keeps every *other*
+model fieldless. Per-model clamping means the level a model receives is
+always one of its own rungs.
+
 ## What it does
 
 - **Login.** The real device flow, byte-for-byte the one `opencode auth login`
@@ -134,6 +180,10 @@ shouts "wake" when a hidden model recovers upstream.
 - `bun test/parity.ts` diffs this plugin's requests against a 15-request trace
   recorded from the actual opencode binary (login, Go chat, free chat). Wire
   identical, modulo random ids.
+- `bun test/reasoning.ts` pins the reasoning mapping: per-model effort
+  ladders, the max-quality default, and the harness's wire shapes.
+- `bun test/routing.ts` pins the cache-first account policy (consolidate,
+  spill at threshold, drain by pin).
 - `bun test/transport.ts` pins the wire contract the free-tier gateway
   validates: header order/casing and the harness's descending session-id
   encoding.

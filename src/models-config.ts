@@ -19,6 +19,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 import { providerOverride } from "./console-config"
+import { GO_CATALOG, OPENCODE_CATALOG, thinkingOverrides } from "./models"
 import {
   DEFAULT_IDENTITY,
   newTrace,
@@ -33,12 +34,29 @@ import {
 
 const BEGIN = "# >>> omp-go managed block (do not edit) >>>"
 const END = "# <<< omp-go managed block <<<"
+// Provider-level body compat. `supportsReasoningEffort` stays false as the
+// SAFE default: models without a catalog effort surface must carry no
+// reasoning fields (the harness sends none). Effort-capable models flip it
+// back on per model via `modelOverrides` (which out-rank this level) and pin
+// their ladder + MAX default there — see `thinkingOverrides`.
 const HARNESS_BODY_COMPAT = ["supportsReasoningEffort: false", "supportsStore: true"]
 const FREE_BODY_COMPAT = ["supportsReasoningEffort: false", "supportsStore: false"]
 const PROVIDERS = [
-  { id: "opencode-go", fallbackURL: ZEN_GO_BASE, freeTier: false, compat: HARNESS_BODY_COMPAT },
+  {
+    id: "opencode-go",
+    fallbackURL: ZEN_GO_BASE,
+    freeTier: false,
+    compat: HARNESS_BODY_COMPAT,
+    catalog: GO_CATALOG,
+  },
   // The free tier: zero-cost catalog models, keyless (`Bearer public`).
-  { id: "opencode-free", fallbackURL: ZEN_BASE, freeTier: true, compat: FREE_BODY_COMPAT },
+  {
+    id: "opencode-free",
+    fallbackURL: ZEN_BASE,
+    freeTier: true,
+    compat: FREE_BODY_COMPAT,
+    catalog: OPENCODE_CATALOG,
+  },
 ] as const
 
 // Respect $HOME like every other tool (Bun's homedir() prefers /etc/passwd,
@@ -76,9 +94,10 @@ export function writeModelsOverride(input: { orgId?: string; identity?: HarnessI
   // one trace with a span per request; a static file can't vary per request,
   // but per-process ids keep every run's ids new (never a permanent constant).
   const trace = spanHeaders(newTrace())
-  const entries = PROVIDERS.map(({ id, fallbackURL, freeTier, compat }) => {
+  const entries = PROVIDERS.map(({ id, fallbackURL, freeTier, compat, catalog }) => {
     const override = providerOverride(input.orgId, id)
     const orgId = input.orgId ?? override.headers["x-opencode-org-id"]
+    const thinking = thinkingOverrides(catalog)
     return [
       `  ${id}:`,
       `    baseUrl: ${(override.baseURL ?? fallbackURL).replace(/\/+$/, "")}`,
@@ -91,6 +110,28 @@ export function writeModelsOverride(input: { orgId?: string; identity?: HarnessI
       ...(freeTier ? [`    apiKey: "public"`] : []),
       `    compat:`,
       ...compat.map((line) => `      ${line}`),
+      // Per-model reasoning surface (out-ranks the provider compat above):
+      // effort-capable models carry `reasoning_effort` — or
+      // `reasoning: {effort, summary:"auto"}` on the Responses protocol —
+      // defaulted to the model's HIGHEST rung. The harness's own default
+      // variant is its lightest (`values[0]`, what the Console shows as
+      // `effort · low`); "max out quality" pins ours to the top of each
+      // ladder. Models without an effort surface get no entry and stay
+      // fieldless, like the harness.
+      ...(thinking.length > 0
+        ? [
+            `    modelOverrides:`,
+            ...thinking.flatMap(({ id: modelID, thinking: config }) => [
+              `      "${modelID}":`,
+              `        thinking:`,
+              `          mode: ${config.mode}`,
+              `          efforts: [${config.efforts.join(", ")}]`,
+              `          defaultLevel: ${config.defaultLevel ?? config.efforts[config.efforts.length - 1]}`,
+              `        compat:`,
+              `          supportsReasoningEffort: true`,
+            ]),
+          ]
+        : []),
       "    headers:",
       `      user-agent: ${userAgent(identity)}`,
       `      accept: "*/*"`,

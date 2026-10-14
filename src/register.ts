@@ -133,10 +133,16 @@ function wireStream(providerID: string, identity: HarnessIdentity, consoleBase: 
           maxTokens: model.maxTokens,
           reasoning: model.reasoning,
           input: model.input,
+          // Per-model reasoning surface (src/models.ts): effort-capable models
+          // carry `reasoning: {effort, summary:"auto"}` plus the
+          // encrypted-reasoning include on the Responses protocol.
+          thinking: model.thinking,
           compat: {
             supportsStore: true,
             supportsUsageInStreaming: true,
-            supportsReasoningEffort: false,
+            supportsReasoningEffort: model.thinking !== undefined,
+            supportsReasoningSummary: true,
+            includeEncryptedReasoning: true,
             reasoningContentField: "reasoning_content",
           },
         } as never)
@@ -147,6 +153,11 @@ function wireStream(providerID: string, identity: HarnessIdentity, consoleBase: 
     return mapRegionGateErrors(
       streamSimple(routed as Model<typeof UPSTREAM_API>, context as Context, {
         ...streamOptions,
+        // Harness `responsesEffort` shape: summary "auto" rides every engaged
+        // reasoning request on the Responses protocol.
+        ...(usesResponsesAPI(model.id) && !(streamOptions && "reasoningSummary" in streamOptions)
+          ? { reasoningSummary: "auto" as const }
+          : {}),
         // Harness-order transport (src/ordered-fetch.ts): the free-tier gateway
         // validates session-id encoding, and the harness's exact wire order keeps
         // the traffic byte-faithful on every lane.

@@ -6,6 +6,7 @@
 // 2026-10-12. `fetchCatalogModels` refreshes from the live catalog at runtime.
 
 import type { ProviderModelConfig } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types"
+import { THINKING_EFFORTS, type Effort } from "@oh-my-pi/pi-catalog/effort"
 import catalog from "./models-catalog.json"
 import zenCatalog from "./models-zen-catalog.json"
 import { DEFAULT_IDENTITY, sessionHeaders, type HarnessIdentity, type SessionIdentity } from "./wire"
@@ -13,13 +14,15 @@ import { DEFAULT_IDENTITY, sessionHeaders, type HarnessIdentity, type SessionIde
 type CatalogModel = {
   name?: string
   reasoning?: boolean
+  reasoning_options?: { type?: string; values?: string[] }[]
   status?: string
   modalities?: { input?: string[] }
   limit?: { context?: number; output?: number }
   cost?: { input?: number; output?: number; cache_read?: number; cache_write?: number }
+  provider?: { npm?: string }
 }
 
-type CatalogEntry = {
+export type CatalogEntry = {
   id: string
   name: string
   api: string
@@ -46,15 +49,6 @@ const HARNESS_COMPAT = {
 } as const
 
 /**
- * The free lane's body carries no `store` (golden capture: the harness sends
- * only model/messages/stream/stream_options[/tools/max_completion_tokens]).
- */
-const FREE_COMPAT = {
-  ...HARNESS_COMPAT,
-  supportsStore: false,
-} as const
-
-/**
  * Models the catalog routes through OpenAI's Responses API (`provider.npm:
  * "@ai-sdk/openai"`) — the gateway rejects them on chat/completions with
  * `ModelProtocolUnsupported`. The harness sends these to `/responses`.
@@ -65,8 +59,36 @@ export function usesResponsesAPI(id: string): boolean {
   return responsesModels.has(id)
 }
 
+/**
+ * The catalog's per-model reasoning knobs (`reasoning_options`) mapped to omp's
+ * canonical thinking config. Effort-capable models wire `reasoning_effort` (or
+ * `reasoning.effort` on the Responses protocol) exactly as the harness's own
+ * variant overlays spell them (opencode `packages/core/src/variant.ts`:
+ * `openaiChat` → `settings.reasoningEffort`, `openaiResponses` →
+ * `reasoning: {effort, summary:"auto"}` + encrypted-reasoning include).
+ * Toggle-only and budget-only models have no controllable surface on these
+ * gateways — the harness sends nothing for them either.
+ *
+ * `defaultLevel` is the model's HIGHEST supported effort ("max out quality").
+ * The harness's default variant is `values[0]` — the lightest rung, which is
+ * why Console requests read `effort · low`. omp applies `defaultLevel` at
+ * model selection; any explicit session reasoning level still wins.
+ */
+function thinkingFor(model: CatalogModel): ProviderModelConfig["thinking"] {
+  const effort = model.reasoning_options?.find((option) => option.type === "effort")
+  if (!effort) return undefined
+  const supported = (effort.values ?? ["low", "medium", "high"]).filter((value): value is Effort =>
+    (THINKING_EFFORTS as readonly string[]).includes(value),
+  )
+  if (supported.length === 0) return undefined
+  const ordered = [...supported].sort((left, right) => THINKING_EFFORTS.indexOf(left) - THINKING_EFFORTS.indexOf(right))
+  return { mode: "effort", efforts: ordered, defaultLevel: ordered[ordered.length - 1] }
+}
+
 export function toProviderModel(id: string, model: CatalogModel): ProviderModelConfig {
-  if ((model as { provider?: { npm?: string } }).provider?.npm === "@ai-sdk/openai") responsesModels.add(id)
+  const isResponses = model.provider?.npm === "@ai-sdk/openai"
+  if (isResponses) responsesModels.add(id)
+  const thinking = thinkingFor(model)
   const input = (model.modalities?.input ?? ["text"]).filter(
     (modality): modality is "text" | "image" => modality === "text" || modality === "image",
   )
@@ -83,11 +105,40 @@ export function toProviderModel(id: string, model: CatalogModel): ProviderModelC
     },
     contextWindow: model.limit?.context ?? DEFAULT_CONTEXT,
     maxTokens: model.limit?.output ?? DEFAULT_OUTPUT,
-    compat: HARNESS_COMPAT,
+    ...(thinking ? { thinking } : {}),
+    compat: {
+      ...HARNESS_COMPAT,
+      // Effort-capable models carry `reasoning_effort` like the harness's
+      // effort variant; models without a controllable surface send nothing.
+      ...(thinking ? { supportsReasoningEffort: true } : {}),
+      // Responses models: `reasoning: {effort, summary:"auto"}` plus the
+      // encrypted-reasoning include (harness `responsesEffort` overlay).
+      ...(isResponses ? { supportsReasoningSummary: true, includeEncryptedReasoning: true } : {}),
+    },
   }
 }
 
 export const OPENCODE_CATALOG = zenCatalog as CatalogEntry
+/** The Go subscription's catalog entry (the `opencode-go` lane). */
+export const GO_CATALOG = catalog as CatalogEntry
+
+/**
+ * Per-model `thinking` overrides for the models.yml maintainer
+ * (src/models-config.ts): effort-capable models pin their ladder and the
+ * MAX default (`defaultLevel`) so requests carry the model's highest rung
+ * (`reasoning_effort`, or `reasoning.effort` on the Responses protocol)
+ * without any per-session configuration. Only models with an `effort`
+ * surface get an entry — everything else keeps the provider-level
+ * `supportsReasoningEffort: false` and sends no reasoning fields, exactly
+ * like the harness.
+ */
+export function thinkingOverrides(
+  entry: CatalogEntry,
+): { id: string; thinking: NonNullable<ProviderModelConfig["thinking"]> }[] {
+  return Object.entries(entry.models)
+    .map(([id, model]) => ({ id, thinking: thinkingFor(model) }))
+    .filter((item): item is { id: string; thinking: NonNullable<ProviderModelConfig["thinking"]> } => item.thinking !== undefined)
+}
 
 export function catalogModels(entry: CatalogEntry = catalog as CatalogEntry): ProviderModelConfig[] {
   // The harness hides deprecated catalog models ("Model unavailable"); mirror
@@ -113,11 +164,18 @@ export function freeModels(entry: CatalogEntry = OPENCODE_CATALOG): ProviderMode
   return allFreeModels(entry).filter((model) => !DEAD_MODELS.has(model.id))
 }
 
-/** The raw free set (no dead-model filter) — what `bun test/gateway-sweep.ts` sweeps. */
+/** The raw free set (no dead-model filter) — what `bun test/gateway-sweep.ts` sweeps.
+ * The free lane's body carries no `store` (golden capture: the harness sends
+ * only model/messages/stream/stream_options[/tools/max_completion_tokens]);
+ * everything else matches the harness compat the model builder derives.
+ */
 export function allFreeModels(entry: CatalogEntry = OPENCODE_CATALOG): ProviderModelConfig[] {
   return Object.entries(entry.models)
     .filter(([, model]) => model.status !== "deprecated" && isFree(model))
-    .map(([id, model]) => ({ ...toProviderModel(id, model), compat: FREE_COMPAT }))
+    .map(([id, model]) => {
+      const built = toProviderModel(id, model)
+      return { ...built, compat: { ...built.compat, supportsStore: false } }
+    })
 }
 
 /**
