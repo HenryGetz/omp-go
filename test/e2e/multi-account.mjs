@@ -161,6 +161,27 @@ try {
     chats.length > 0 && chats.every((request) => request.headers["x-opencode-org-id"] !== undefined),
     `chat requests carry x-opencode-org-id (${chats.length} at stub)`,
   )
+  // Token <-> org pairing: each pooled credential must carry its OWN org on
+  // every request. A cross-paired request is what the gateway answers with
+  // "Workspace access denied" (the token is not a member of that org).
+  const pairing = new Map()
+  for (const request of chats) {
+    const bearer = request.headers["authorization"] ?? "?"
+    const org = request.headers["x-opencode-org-id"]
+    if (!pairing.has(bearer)) pairing.set(bearer, new Set())
+    pairing.get(bearer).add(org)
+  }
+  // Strict: every token always carries its own org. (Whether chats spread
+  // across the pool is the ranker's call — usage-driven and tie-break
+  // dependent — so that is not asserted here; the pooled-requests check below
+  // covers account fan-out.)
+  const pairedClean = [...pairing.values()].every((orgs) => orgs.size === 1)
+  const distinctOrgs = new Set([...pairing.values()].map((orgs) => [...orgs][0]))
+  note(
+    pairedClean && (pairing.size === 1 || distinctOrgs.size === pairing.size),
+    `token/org pairing consistent (${[...pairing].map(([b, o]) => `${b.slice(-10)}->${[...o][0]}`).join(", ")})`,
+  )
+
   const usageBearers = [
     ...new Set(
       requests

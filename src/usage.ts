@@ -29,6 +29,7 @@ import type {
   UsageStatus,
   UsageWindow,
 } from "@oh-my-pi/pi-ai"
+import { accountVerdict, VERDICT_TTL_MS } from "./verdicts"
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error"
 import { sessionHeaders, type HarnessIdentity, type SessionIdentity } from "./wire"
 
@@ -114,6 +115,17 @@ export function opencodeGoUsageProvider(options: OpencodeGoUsageOptions): UsageP
       const token =
         params.credential.type === "api_key" ? params.credential.apiKey : params.credential.accessToken
       if (!token) return null
+      // A recent inference-time verdict (402 funds / 403 workspace) is a
+      // credential verdict even when this endpoint answers fine: fail loudly
+      // so the pool demotes the account instead of preferring its "0% used"
+      // quota forever.
+      const verdict = accountVerdict(token)
+      if (verdict) {
+        throw new ProviderHttpError(
+          `account verdict from inference: ${verdict.message} (re-checks automatically in ${Math.max(1, Math.round((VERDICT_TTL_MS - (Date.now() - verdict.at)) / 60_000))}m)`,
+          403,
+        )
+      }
       // Accept both catalog spellings ("zen/go" and "zen/go/v1") like omp's built-in.
       const stripped = (params.baseUrl ?? "https://opencode.ai/zen/go").trim().replace(/\/+$/, "").replace(/\/v1$/i, "")
       const response = await ctx.fetch(`${stripped}/v1/usage`, {
@@ -125,9 +137,12 @@ export function opencodeGoUsageProvider(options: OpencodeGoUsageOptions): UsageP
         signal: params.signal,
       })
       if (!response.ok) {
-        // 401/403 are credential verdicts: fail loudly so health checks flag the
+        // 401/402/403 are credential verdicts (402 = "Insufficient account
+        // funds" — an account that cannot serve must not keep a healthy
+        // ranking, or the pooler keeps preferring its "0% used" quota):
+        // fail loudly so health checks flag the
         // credential instead of reporting unknown status.
-        if (response.status === 401 || response.status === 403) {
+        if (response.status === 401 || response.status === 402 || response.status === 403) {
           let detail: string | undefined
           try {
             const payload = (await response.json()) as { error?: { message?: unknown } }

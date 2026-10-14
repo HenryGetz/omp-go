@@ -101,6 +101,13 @@ weekly / monthly windows.
   disabled when keyless), deprecated entries hidden. The gateway enforces it:
   requests must carry the harness's session-id encoding and look like a real
   agent conversation, and this plugin speaks both natively.
+- **Account switching that learns.** The pool ranks accounts by remaining
+  quota, which makes a broken account at 0% look like the best pick. Inference
+  verdicts (`402 Insufficient account funds`, `403 Workspace access denied`,
+  region policy) now rotate to a healthy sibling mid-turn AND demote the
+  account in health checks for 30 minutes — a dead account cannot keep winning
+  the ranking just because it never served anything. Verdicts expire, so a
+  topped-up account heals itself.
 - **Limits.** `omp usage` shows the 5h / weekly / monthly windows, so you can
   watch the monthly one climb like everyone else. Log in with a second account
   (`/login` again — or `omp login opencode-free`) and omp pools and

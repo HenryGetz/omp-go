@@ -151,6 +151,7 @@ function wireStream(providerID: string, identity: HarnessIdentity, consoleBase: 
           ...(orgId ? { "x-opencode-org-id": orgId } : {}),
         },
       } as SimpleStreamOptions),
+      token,
     )
   }
 }
