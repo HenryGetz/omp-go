@@ -113,13 +113,14 @@ weekly / monthly windows.
   false`), because bun's fetch sorts headers and the free-tier gateway checks.
   Golden-trace parity against the real harness enforces the rest.
 
-A handful of catalog entries drift dead upstream without warning (right now:
+Some catalog entries drift dead upstream without warning (right now:
 `exo-free` answers `410 ModelDeprecated`, `ling-3.0-flash-fin-free` is
-unavailable, `ling-3.1-flash-free` is rate-limited). The harness's own picker
-shows them too — `bun test/gateway-sweep.ts` keeps the list honest and proves
-every other model routes on its correct protocol (yes, some free models are
-Responses-API, and yes, the gateway will tell you exactly that if you send
-them down the wrong one).
+unavailable). The harness's picker shows them broken; **this plugin hides
+them**, so every model `opencode-free` offers actually works.
+`bun test/gateway-sweep.ts` chats with every free model on its correct
+protocol (yes, some are Responses-API — the gateway will say "model does not
+support this protocol" if you route them wrong), retries rate limits, and
+shouts "wake" when a hidden model recovers upstream.
 
 ## Proof
 

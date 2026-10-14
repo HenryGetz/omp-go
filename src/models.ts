@@ -110,10 +110,25 @@ function isFree(model: CatalogModel): boolean {
  * so the free path can never demand a key.
  */
 export function freeModels(entry: CatalogEntry = OPENCODE_CATALOG): ProviderModelConfig[] {
+  return allFreeModels(entry).filter((model) => !DEAD_MODELS.has(model.id))
+}
+
+/** The raw free set (no dead-model filter) — what `bun test/gateway-sweep.ts` sweeps. */
+export function allFreeModels(entry: CatalogEntry = OPENCODE_CATALOG): ProviderModelConfig[] {
   return Object.entries(entry.models)
     .filter(([, model]) => model.status !== "deprecated" && isFree(model))
     .map(([id, model]) => ({ ...toProviderModel(id, model), compat: FREE_COMPAT }))
 }
+
+/**
+ * Models the catalog calls live but the gateway rejects outright. The harness
+ * shows these as pickable and then fails on them; we hide them so everything
+ * this plugin offers actually works. Maintained by `bun test/gateway-sweep.ts`
+ * — when one recovers upstream, the sweep says so ("wake"); delete it here.
+ * Verified dead 2026-10-14: ling-3.0-flash-fin-free ("Model is unavailable"),
+ * exo-free (`410 ModelDeprecated`).
+ */
+export const DEAD_MODELS = new Set(["ling-3.0-flash-fin-free", "exo-free"])
 
 /** Live refresh of the free set (same catalog fetch, same free/deprecated rules). */
 export async function fetchFreeModels(options: {

@@ -8,7 +8,7 @@
 //   bun test/gateway-sweep.ts
 
 import { readFileSync } from "node:fs"
-import { freeModels, usesResponsesAPI } from "../src/models"
+import { allFreeModels, DEAD_MODELS, usesResponsesAPI } from "../src/models"
 import { harnessFetch } from "../src/ordered-fetch"
 
 // A real agent-conversation body (the free tier's gate checks the payload is
@@ -18,16 +18,35 @@ const responsesBody = JSON.parse(readFileSync(new URL("./fixtures/responses-body
 
 let broken = 0
 let upstream = 0
-for (const model of freeModels()) {
+for (const model of allFreeModels()) {
   const responses = usesResponsesAPI(model.id)
   const body = JSON.stringify({ ...(responses ? responsesBody : completionsBody), model: model.id })
   const url = `https://opencode.ai/inference/v1/${responses ? "responses" : "chat/completions"}`
   try {
-    const res = await harnessFetch(url, { method: "POST", headers: { authorization: "Bearer public" }, body })
-    const text = await res.text()
+    const send = async () => {
+      const res = await harnessFetch(url, { method: "POST", headers: { authorization: "Bearer public" }, body })
+      if (res.status !== 200) return { res, text: await res.text() }
+      // 200 + the stream actually producing events is the proof; don't burn
+      // minutes consuming every completion.
+      const reader = res.body!.getReader()
+      const first = await reader.read()
+      await reader.cancel().catch(() => undefined)
+      return { res, text: first.value ? "streaming" : "empty stream" }
+    }
+    let { res, text } = await send()
+    if (res.status === 429) {
+      // Rate limits are transient (observed: ling-3.1 flips 429 -> 200).
+      await new Promise((done) => setTimeout(done, 5_000))
+      ;({ res, text } = await send())
+    }
     const protocol = responses ? "responses" : "completions"
     if (res.status === 200) {
-      console.log(`ok   ${model.id} (${protocol})`)
+      console.log(`${DEAD_MODELS.has(model.id) ? "wake" : "ok  "} ${model.id} (${protocol})${DEAD_MODELS.has(model.id) ? " — RECOVERED, remove from DEAD_MODELS" : ""}`)
+      continue
+    }
+    if (DEAD_MODELS.has(model.id)) {
+      upstream++
+      console.log(`hid  ${model.id} (${protocol}) -> ${res.status} (known dead upstream, hidden from the picker)`)
       continue
     }
     // Routing/protocol problems are ours; availability drift is upstream's.
