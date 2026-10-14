@@ -19,6 +19,7 @@
 // before delegating — the request is then built by the stock OpenAI-compatible
 // protocol with our headers on top.
 
+import { appendFileSync } from "node:fs"
 import type {
   ExtensionAPI,
   ProviderConfig,
@@ -35,7 +36,7 @@ import type { Api, Model, SimpleStreamOptions, Context, AssistantMessageEventStr
 import { providerOverride, refreshConsoleConfig } from "./console-config"
 import { mapRegionGateErrors } from "./region"
 import { writeModelsOverride } from "./models-config"
-import { OpencodeOAuthProvider } from "./opencode-provider"
+import { OpencodeOAuthProvider, orgForToken } from "./opencode-provider"
 import { catalogModels, fetchCatalogModels, fetchFreeModels, freeModels, usesResponsesAPI } from "./models"
 import { OPENCODE_GO_PROVIDER, opencodeGoUsageProvider } from "./usage"
 import {
@@ -85,10 +86,20 @@ sessionIdentity.affinity = sessionIdentity.session
 /** Per-request fingerprint + Console-config merge, shared by both providers. */
 function wireStream(providerID: string, identity: HarnessIdentity, consoleBase: string | undefined) {
   return (model: Model<Api>, context: Context, streamOptions?: SimpleStreamOptions): AssistantMessageEventStream => {
-    // Per-request credential identity (org/region) rides on oauthIdentity.
-    const orgId = streamOptions?.oauthIdentity?.orgId
-    const override = providerOverride(orgId, providerID)
+    // The org MUST be the serving credential's own: the gateway rejects a
+    // token paired with an org it is not a member of ("Workspace access
+    // denied"). Prefer the pipeline's identity; fall back to the credential
+    // resolution index (orgForToken) which is keyed by the exact bearer sent.
     const token = typeof streamOptions?.apiKey === "string" ? streamOptions.apiKey : undefined
+    const orgId = streamOptions?.oauthIdentity?.orgId ?? orgForToken(token)
+    if (process.env.OMP_ORG_DEBUG)
+      try {
+        appendFileSync(
+          process.env.OMP_ORG_DEBUG,
+          `${JSON.stringify({ apiKeyType: typeof streamOptions?.apiKey, token: token ? `...${token.slice(-6)}` : "none", org: orgId ?? "none" })}\n`,
+        )
+      } catch {}
+    const override = providerOverride(orgId, providerID)
     // Keep the Console config mirror warm: the harness polls /api/v2/config
     // every minute and merges pushed headers/endpoints; we do the same.
     if (token)
@@ -173,8 +184,11 @@ function projectModels(models: Model<Api>[], credentials: { orgId?: string }) {
       ...(override.baseURL ? { baseUrl: override.baseURL } : {}),
       headers: {
         ...model.headers,
+        // The org is NOT stamped here: projection-time credentials outlive the
+        // request, and a static org paired with the pool's OTHER token is what
+        // the gateway rejects with "Workspace access denied". wireStream injects
+        // the serving credential's own org per attempt.
         ...override.headers,
-        ...(credentials.orgId ? { "x-opencode-org-id": credentials.orgId } : {}),
       },
       resolveHeaders: async () => sessionHeaders(sessionIdentity, DEFAULT_IDENTITY),
     })

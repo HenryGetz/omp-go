@@ -30,6 +30,7 @@ import type {
   UsageWindow,
 } from "@oh-my-pi/pi-ai"
 import { accountVerdict, VERDICT_TTL_MS } from "./verdicts"
+import { indexTokenOrg } from "./opencode-provider"
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error"
 import { sessionHeaders, type HarnessIdentity, type SessionIdentity } from "./wire"
 
@@ -115,6 +116,11 @@ export function opencodeGoUsageProvider(options: OpencodeGoUsageOptions): UsageP
       const token =
         params.credential.type === "api_key" ? params.credential.apiKey : params.credential.accessToken
       if (!token) return null
+      // Bind token -> org here: the usage poll runs per credential and carries
+      // its identity, so the request path can attribute each request to the
+      // SERVING credential's own org (a cross-paired org gets "Workspace
+      // access denied" from the gateway).
+      indexTokenOrg(token, params.credential.orgId)
       // A recent inference-time verdict (402 funds / 403 workspace) is a
       // credential verdict even when this endpoint answers fine: fail loudly
       // so the pool demotes the account instead of preferring its "0% used"

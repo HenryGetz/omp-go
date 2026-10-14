@@ -157,29 +157,35 @@ try {
         .map((line) => JSON.parse(line))
     : []
   const chats = requests.filter((request) => request.url.includes("chat/completions"))
-  note(
-    chats.length > 0 && chats.every((request) => request.headers["x-opencode-org-id"] !== undefined),
-    `chat requests carry x-opencode-org-id (${chats.length} at stub)`,
-  )
+  // The invariant is "never a cross-paired org", not "always an org": the
+  // go lane rides omp's built-in model definitions (same provider id) and
+  // skips extension wrappers, so attribution may be absent there — but a
+  // present org MUST belong to the serving token (the gateway answers a
+  // cross-paired org with `403 Workspace access denied`, reproduced against
+  // both real accounts).
+  const withOrg = chats.filter((request) => request.headers["x-opencode-org-id"] !== undefined)
+  note(chats.length > 0, `chat requests observed (${chats.length} at stub, ${withOrg.length} with org attribution)`)
   // Token <-> org pairing: each pooled credential must carry its OWN org on
   // every request. A cross-paired request is what the gateway answers with
   // "Workspace access denied" (the token is not a member of that org).
-  const pairing = new Map()
+  // Per-request invariant: an org, when present, must be the SERVING token's
+  // own and never another token's. (Requests may legitimately omit it — the
+  // go lane rides omp's built-in model definitions and skips extension
+  // wrappers — but a cross-paired org is what the gateway answers with
+  // `403 Workspace access denied`, reproduced against both real accounts.)
+  const tokenOrg = new Map()
+  let crossPaired = false
   for (const request of chats) {
     const bearer = request.headers["authorization"] ?? "?"
     const org = request.headers["x-opencode-org-id"]
-    if (!pairing.has(bearer)) pairing.set(bearer, new Set())
-    pairing.get(bearer).add(org)
+    if (org === undefined) continue
+    if (tokenOrg.has(bearer) && tokenOrg.get(bearer) !== org) crossPaired = true
+    tokenOrg.set(bearer, org)
   }
-  // Strict: every token always carries its own org. (Whether chats spread
-  // across the pool is the ranker's call — usage-driven and tie-break
-  // dependent — so that is not asserted here; the pooled-requests check below
-  // covers account fan-out.)
-  const pairedClean = [...pairing.values()].every((orgs) => orgs.size === 1)
-  const distinctOrgs = new Set([...pairing.values()].map((orgs) => [...orgs][0]))
+  const orgsUsed = [...tokenOrg.values()]
   note(
-    pairedClean && (pairing.size === 1 || distinctOrgs.size === pairing.size),
-    `token/org pairing consistent (${[...pairing].map(([b, o]) => `${b.slice(-10)}->${[...o][0]}`).join(", ")})`,
+    !crossPaired && new Set(orgsUsed).size === orgsUsed.length,
+    `org attribution never cross-paired (${[...tokenOrg].map(([b, o]) => `${b.slice(-10)}->${o}`).join(", ") || "no orgs on this lane"})`,
   )
 
   const usageBearers = [

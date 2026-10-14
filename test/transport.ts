@@ -4,7 +4,11 @@
 // if one of them breaks, free-tier requests get `FreeTierError`.
 
 import assert from "node:assert/strict"
+import { mkdtempSync, readFileSync, readdirSync } from "node:fs"
+import { tmpdir } from "node:os"
+import path from "node:path"
 import { assembleHeaders } from "../src/ordered-fetch"
+import { writeModelsOverride } from "../src/models-config"
 import { isHarnessID } from "../src/identifier"
 
 const url = new URL("https://opencode.ai/inference/v1/chat/completions")
@@ -55,4 +59,24 @@ assert.equal(headers["traceparent"], `00-${headers["b3"].split("-")[0]}-${header
 const withOrg = assembleHeaders(url, { authorization: "Bearer public", "x-opencode-org-id": "org_42" }, body)
 assert.equal(withOrg["x-opencode-org-id"], "org_42")
 
-console.log("TRANSPORT OK: harness header order, casing, and session-id scheme pinned")
+// Static org stamps are banned: an org written into models.yml outlives the
+// per-request credential, and the pool's other token then serves under the
+// wrong org — the gateway answers `403 Workspace access denied` (reproduced
+// against both real accounts). The org rides the serving credential only.
+{
+  const home = mkdtempSync(path.join(tmpdir(), "omp-org-stamp-"))
+  const previousHome = process.env.HOME
+  process.env.HOME = home
+  try {
+    writeModelsOverride({ orgId: "wrk_01TESTWORKSPACE000000000000" })
+    const dir = path.join(home, ".omp", "agent")
+    const content = readFileSync(path.join(dir, readdirSync(dir).find((name) => name === "models.yml")!), "utf8")
+    assert.ok(!content.includes("x-opencode-org-id"), "models.yml never stamps x-opencode-org-id")
+    assert.ok(!content.includes("wrk_01TESTWORKSPACE"), "no org value leaks into the managed block")
+    assert.ok(content.includes("x-session-id"), "attribution headers still present")
+  } finally {
+    process.env.HOME = previousHome
+  }
+}
+
+console.log("TRANSPORT OK: header order/casing, session-id scheme, and no static org stamps")

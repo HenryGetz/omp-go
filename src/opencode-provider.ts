@@ -18,6 +18,10 @@
 // - `400 {"error":"invalid_grant"}` means the session is dead: surface a
 //   token-refresh failure so omp asks for a fresh login instead of retrying.
 
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { homedir } from "node:os"
+import path from "node:path"
+
 import { OAuthError } from "@oh-my-pi/pi-ai/error"
 import {
   pollOAuthDeviceCodeFlow,
@@ -63,6 +67,58 @@ export type OpencodeProviderOptions = {
   /** Harness identity to emit on the wire (User-Agent + client name). */
   identity?: HarnessIdentity
   fetch?: typeof fetch
+}
+
+/**
+ * token -> org index, filled as credentials are resolved. The request path
+ * must attribute each request to the SERVING credential's own org: a wrong
+ * org paired with a token gets `403 Workspace access denied` from the gateway
+ * (reproduced against both real accounts), and no org at all loses workspace
+ * attribution. pi-ai's `oauthIdentity` does not reach extension stream
+ * wrappers in practice, so the credential resolution point is the binding.
+ */
+const tokenOrgs = new Map<string, string>()
+let sidecarLoaded = false
+
+// Persisted: every omp invocation is a fresh process, and the request path
+// must find the org for a token resolved by an earlier one (login, usage
+// poll). Same directory and permissions as omp's own credential store.
+function orgsFile(): string {
+  return path.join(process.env.HOME || homedir(), ".omp", "agent", "omp-go-orgs.json")
+}
+
+function loadSidecar(): void {
+  if (sidecarLoaded) return
+  sidecarLoaded = true
+  try {
+    const entries = JSON.parse(readFileSync(orgsFile(), "utf8")) as Record<string, string>
+    for (const [token, org] of Object.entries(entries)) tokenOrgs.set(token, org)
+  } catch {
+    // no sidecar yet
+  }
+}
+
+function persistSidecar(): void {
+  try {
+    mkdirSync(path.dirname(orgsFile()), { recursive: true })
+    // Bound the file: tokens rotate; keep only the newest handful.
+    const entries = [...tokenOrgs.entries()].slice(-32)
+    writeFileSync(orgsFile(), `${JSON.stringify(Object.fromEntries(entries))}\n`, { mode: 0o600 })
+  } catch {
+    // best-effort
+  }
+}
+
+export function indexTokenOrg(token: string | undefined, orgId: string | undefined): void {
+  if (!token || !orgId) return
+  tokenOrgs.set(token, orgId)
+  persistSidecar()
+}
+
+export function orgForToken(token: string | undefined): string | undefined {
+  if (!token) return undefined
+  loadSidecar()
+  return tokenOrgs.get(token)
 }
 
 export class OpencodeOAuthProvider implements OAuthProviderInterface {
@@ -169,6 +225,7 @@ export class OpencodeOAuthProvider implements OAuthProviderInterface {
     // Keep the models.yml fingerprint block current with this workspace,
     // including the Console-config endpoints fetched just above.
     writeModelsOverride({ orgId: org?.id, identity: this.options.identity })
+    indexTokenOrg(token.access_token, org?.id)
     return {
       refresh: token.refresh_token,
       access: token.access_token,
@@ -209,6 +266,7 @@ export class OpencodeOAuthProvider implements OAuthProviderInterface {
         status: response.status,
       })
     const token = (await response.json()) as ConsoleToken
+    if (token.access_token && token.org_id) indexTokenOrg(token.access_token, token.org_id)
     // Rotated pair: callers persist both before any further request (single-use refresh tokens).
     return {
       ...credentials,
@@ -229,6 +287,7 @@ export class OpencodeOAuthProvider implements OAuthProviderInterface {
 
   /** The Go gateway accepts the Console access token directly as a bearer key; no exchange exists. */
   getApiKey(credentials: OAuthCredentials): string {
+    indexTokenOrg(credentials.access, (credentials as { orgId?: string }).orgId)
     return credentials.access
   }
 

@@ -41,14 +41,20 @@ const PROVIDERS = [
   { id: "opencode-free", fallbackURL: ZEN_BASE, freeTier: true, compat: FREE_BODY_COMPAT },
 ] as const
 
+// Respect $HOME like every other tool (Bun's homedir() prefers /etc/passwd,
+// which breaks profile-isolated runs and tests).
+function agentHome(): string {
+  return process.env.HOME || homedir()
+}
+
 function modelsFile(): string {
-  return path.join(homedir(), ".omp", "agent", "models.yml")
+  return path.join(agentHome(), ".omp", "agent", "models.yml")
 }
 
 // Stable identity for static attribution headers; persisted so it does not
 // churn between runs (the harness's ids are stable per session/project too).
 function stableIds(): { session: string; project: string } {
-  const file = path.join(homedir(), ".omp", "agent", "omp-go-wire-ids.json")
+  const file = path.join(agentHome(), ".omp", "agent", "omp-go-wire-ids.json")
   try {
     return JSON.parse(readFileSync(file, "utf8")) as { session: string; project: string }
   } catch {
@@ -95,7 +101,11 @@ export function writeModelsOverride(input: { orgId?: string; identity?: HarnessI
       `      x-session-affinity: ${ids.session}`,
       `      x-session-id: ${ids.session}`,
       ...Object.entries(trace).map(([name, value]) => `      ${name}: ${value}`),
-      ...(orgId ? [`      x-opencode-org-id: ${orgId}`] : []),
+      // NO x-opencode-org-id here, ever: a static org stamp outlives the
+      // per-request credential, and the gateway answers a token that is not a
+      // member of that org with `403 Workspace access denied` (verified against
+      // both real accounts). The org rides the serving credential only — see
+      // wireStream's per-attempt injection.
     ].join("\n")
   })
   const block = [BEGIN, "providers:", ...entries, END].join("\n")
