@@ -123,6 +123,14 @@ async function chatContinue(label, prompt) {
   }
 }
 
+// Flip an account's billing to dry (402 + the gateway's ~27-min wait hint).
+async function setFunds(account, dry) {
+  await fetch(`${STUB_URL}/control/funds`, {
+    method: "POST",
+    body: JSON.stringify({ account, dry }),
+  })
+}
+
 // Change one account's windows at the stub, then refresh usage so the router's
 // state (written by the provider's own usage poll) reflects it.
 async function setUsage(account, percent) {
@@ -224,6 +232,29 @@ try {
     spillBearers.length > 0 && spillBearers.every((bearer) => bearer === "at_stub_102"),
     `new sessions spill to the sibling at 90% (${[...new Set(spillBearers)].join(", ") || "none"})`,
   )
+
+  // 6. Account verdicts (402 funds): the turn must rotate to the healthy
+  // sibling instead of dying on the gateway's ~27-min wait hint, and the
+  // verdict must survive across processes — every chat here is a fresh omp,
+  // and the dry account's quota still looks fine.
+  await setUsage(1, 5)
+  await setUsage(2, 95) // force the next pin onto the (about to be) dry account
+  await setFunds(1, true)
+  const afterFundsOn = mark()
+  await chat("funds-1")
+  const fundsTurn = chatBearers(afterFundsOn)
+  note(
+    fundsTurn.length >= 2 && fundsTurn[0] === "at_stub_101" && fundsTurn.at(-1) === "at_stub_102",
+    `funds turn rotates to the healthy sibling (${fundsTurn.join(", ") || "none"})`,
+  )
+  const afterFundsOff = mark()
+  await chat("funds-2")
+  const freshTurn = chatBearers(afterFundsOff)
+  note(
+    freshTurn.length > 0 && freshTurn[0] === "at_stub_102",
+    `new session avoids the verdict'd account across processes (${freshTurn.join(", ") || "none"})`,
+  )
+  await setFunds(1, false)
 } finally {
   stub.kill()
 }

@@ -62,6 +62,8 @@ const agent = new https.Agent({ keepAlive: true })
 const SESSION = sessionID()
 const PROJECT = projectID()
 const TRACE = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("")
+/** Provider "wait this long" hints — stripped on account verdicts (see respond()). */
+const WAIT_HINT = /^(retry-after|retry-after-ms|x-ratelimit-reset.*|ratelimit-reset.*)$/i
 let spans = 0
 
 type HeaderInput = HeadersInit | undefined
@@ -169,8 +171,19 @@ export async function harnessFetch(input: RequestInfo | URL, init?: RequestInit)
     req.on("response", (res) => {
       const decompressor = decode(res.headers["content-encoding"])
       const headers = new Headers()
+      const status = res.statusCode ?? 0
+      // Account verdicts (402 funds, 403 workspace, 400 region policy) answer
+      // with retry-after / x-ratelimit-reset hints that describe the ACCOUNT's
+      // window ("this account resets in ~27m"), not this request. If they
+      // reach pi-ai's retry layer it tries to sleep out the window and aborts
+      // the turn ("Retry failed: Provider requested 1651673ms wait") instead
+      // of rotating to a healthy sibling. Strip the wait hints on these so the
+      // 403 rotation lane wins immediately. 429 keeps its hints: that is a
+      // real request-level rate limit where waiting is correct.
+      const gateVerdict = status === 400 || status === 402 || status === 403
       for (const [name, value] of Object.entries(res.headers)) {
         if (value === undefined || name === "content-encoding") continue
+        if (gateVerdict && WAIT_HINT.test(name)) continue
         if (Array.isArray(value)) for (const v of value) headers.append(name, v)
         else headers.set(name, value)
       }

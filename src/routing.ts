@@ -34,6 +34,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types"
+import { orgVerdict } from "./verdicts"
 
 /** The host's own AuthStorage type, derived from the extension API namespace. */
 type HostAuth = Awaited<ReturnType<ExtensionAPI["pi"]["discoverAuthStorage"]>>
@@ -215,7 +216,10 @@ export async function pinNewSession(
     return {
       credentialId: account.credentialId,
       orgId: account.orgId,
-      state: measured?.state,
+      // A fresh account verdict (402 funds / 403 workspace / region policy)
+      // makes the account unusable for NEW sessions even though its quota
+      // windows look untouched — treat it as depleted so the pin skips it.
+      state: orgVerdict(account.orgId) ? "depleted" : measured?.state,
       remainingFraction: measured?.remainingFraction,
       usedPct: routing?.usedPct,
       lastServedAtMs: routing?.lastServedAtMs,

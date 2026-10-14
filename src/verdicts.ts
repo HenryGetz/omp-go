@@ -6,8 +6,17 @@
 // request path records those verdicts here; the usage/health layer reads them
 // and fails loudly, which is what demotes the account in the pool.
 //
-// Keyed by the bearer token itself (both sides have it; in-memory only, never
-// persisted or logged). Verdicts expire so a topped-up account heals itself.
+// Two copies, both TTL'd (a topped-up account must heal itself):
+//   - by bearer token, in-memory: the request path has the token, never log it.
+//   - by org id, persisted (omp-go-verdicts.json): every NEW omp process would
+//     otherwise forget the verdict and pin fresh sessions to the broken
+//     account again — its quota windows look untouched while its billing is
+//     dry (`402 Insufficient account funds`). The routing layer consults this
+//     copy before pinning a session.
+
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { homedir } from "node:os"
+import path from "node:path"
 
 export type AccountVerdict = {
   kind: "funds" | "workspace" | "region"
@@ -18,9 +27,50 @@ export type AccountVerdict = {
 const verdicts = new Map<string, AccountVerdict>()
 export const VERDICT_TTL_MS = 30 * 60 * 1000
 
-export function markAccountVerdict(token: string | undefined, verdict: AccountVerdict): void {
+function verdictsFile(): string {
+  return path.join(process.env.HOME || homedir(), ".omp", "agent", "omp-go-verdicts.json")
+}
+
+function loadOrgVerdicts(): Record<string, AccountVerdict> {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(verdictsFile(), "utf8"))
+    if (typeof parsed !== "object" || parsed === null) return {}
+    const now = Date.now()
+    const state: Record<string, AccountVerdict> = {}
+    for (const [orgId, entry] of Object.entries(parsed)) {
+      if (typeof entry !== "object" || entry === null) continue
+      const at = "at" in entry ? entry.at : undefined
+      const kind = "kind" in entry ? entry.kind : undefined
+      const message = "message" in entry ? entry.message : undefined
+      if (typeof at !== "number" || now - at > VERDICT_TTL_MS) continue
+      if (kind !== "funds" && kind !== "workspace" && kind !== "region") continue
+      state[orgId] = { kind, message: typeof message === "string" ? message : "", at }
+    }
+    return state
+  } catch {
+    return {}
+  }
+}
+
+function saveOrgVerdicts(state: Record<string, AccountVerdict>): void {
+  try {
+    const file = verdictsFile()
+    mkdirSync(path.dirname(file), { recursive: true })
+    const tmp = `${file}.tmp`
+    writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 })
+    renameSync(tmp, file)
+  } catch {
+    // Best-effort: verdict bookkeeping must never break a request.
+  }
+}
+
+export function markAccountVerdict(token: string | undefined, verdict: AccountVerdict, orgId?: string): void {
   if (!token) return
   verdicts.set(token, verdict)
+  if (!orgId) return
+  const state = loadOrgVerdicts()
+  state[orgId] = verdict
+  saveOrgVerdicts(state)
 }
 
 /** TTL-aware read; expired verdicts delete themselves (account may have healed). */
@@ -35,7 +85,14 @@ export function accountVerdict(token: string | undefined): AccountVerdict | unde
   return verdict
 }
 
+/** Cross-process verdict for an org: consulted before pinning new sessions. */
+export function orgVerdict(orgId: string | undefined): AccountVerdict | undefined {
+  if (!orgId) return undefined
+  return loadOrgVerdicts()[orgId]
+}
+
 /** Test hook. */
 export function clearAccountVerdicts(): void {
   verdicts.clear()
+  saveOrgVerdicts({})
 }

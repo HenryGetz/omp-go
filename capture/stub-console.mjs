@@ -30,6 +30,12 @@ function tokenAccountNumber(value) {
 // defaults below (rolling 42 / weekly 85 / monthly 12).
 const usageOverrides = JSON.parse(process.env.STUB_USAGE_BY_ACCOUNT ?? "{}")
 
+// Accounts whose billing is dry: their chat requests answer 402 with the
+// gateway's real retry hint (the ACCOUNT's window reset, ~27 min) — the shape
+// that used to trap the retry layer instead of rotating to a sibling.
+// Mutable at runtime: POST /control/funds {"account":1,"dry":true}.
+const fundsDry = new Set()
+
 // Which account's workspace is not Global (deepseek gated). Account 1 by
 // request via STUB_REGION_GATED_ACCOUNT; defaults to account 2 as ever.
 const regionGatedOrgId = () => accountFor(Number(process.env.STUB_REGION_GATED_ACCOUNT ?? 2)).orgId
@@ -145,6 +151,21 @@ createServer((req, res) => {
       // for it (mirrors the live 400).
       const acct = accountFor(tokenAccountNumber(req.headers.authorization))
       const org = req.headers["x-opencode-org-id"]
+      // Billing dry: the gateway's real 402 shape — the retry hint describes
+      // the ACCOUNT's window reset (~27 min), which used to trap the retry
+      // layer into sleeping instead of rotating to a sibling.
+      if (fundsDry.has(tokenAccountNumber(req.headers.authorization))) {
+        const payload402 = JSON.stringify({
+          error: { type: "server_error", message: "Upstream request failed: Insufficient account funds" },
+        })
+        res.writeHead(402, {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(payload402),
+          "retry-after-ms": "1651673",
+          "x-ratelimit-reset-requests": "1651",
+        })
+        return res.end(payload402)
+      }
       if (accountSeq >= 2 && org === regionGatedOrgId() && /deepseek/.test(String(payload.model)))
         return send(res, 400, {
           error: {
@@ -176,6 +197,13 @@ createServer((req, res) => {
       res.write(chunk({}, "stop"))
       res.write("data: [DONE]\n\n")
       return res.end()
+    }
+    if (req.method === "POST" && p === "/control/funds") {
+      const patch = JSON.parse(body)
+      const account = tokenAccountNumber(`at_stub_${100 + Number(patch.account ?? 1)}`)
+      if (patch.dry) fundsDry.add(account)
+      else fundsDry.delete(account)
+      return send(res, 200, { ok: true, account, dry: Boolean(patch.dry) })
     }
     if (req.method === "POST" && p === "/control/usage") {
       const patch = JSON.parse(body)

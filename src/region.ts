@@ -20,6 +20,7 @@ import type { AssistantMessageEvent, AssistantMessageEventStream } from "@oh-my-
 // only rewrites explicit package exports (same rule as the streamSimple import).
 import { createAssistantMessageEventStream } from "@oh-my-pi/pi-ai"
 import { markAccountVerdict } from "./verdicts"
+import { orgForToken } from "./opencode-provider"
 
 const REGION_GATE = /requires\s+Global\s+regions|Privacy settings/i
 const ACCOUNT_GATE = /Insufficient account funds|Workspace access denied/i
@@ -85,7 +86,7 @@ export function mapRegionGateErrors(source: AssistantMessageEventStream, token?:
               ? "account is not a member of the attributed workspace"
               : "workspace policy blocks this model (Privacy not Global)",
           at: Date.now(),
-        })
+        }, orgForToken(token))
       }
       out.fail(reshape(error))
     }
