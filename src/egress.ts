@@ -288,6 +288,18 @@ export async function testEgressFlow(): Promise<string> {
   return lines.join("\n") || "no egress hosts configured"
 }
 
+/**
+ * The tunnel behind a proxy hop died (its SOCKS port refused/timeout): drop
+ * the record so the next request spawns a fresh ssh — that is the "revives
+ * itself" half of the failover story.
+ */
+export function dropTunnelByProxy(proxy: Proxy): void {
+  const port = Number(new URL(proxy.raw).port)
+  for (const [target, tunnel] of tunnels) {
+    if (tunnel.port === port) stopTunnel(target)
+  }
+}
+
 /** Live tunnel state for `/egress` listings. */
 export function tunnelStatus(): Array<EgressHost & { tunnel: boolean; port?: number }> {
   return listHosts().map((host) => {

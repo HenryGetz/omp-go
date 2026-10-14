@@ -29,7 +29,7 @@ import zlib from "node:zlib"
 import type { Transform } from "node:stream"
 import { DEFAULT_IDENTITY, projectID, sessionID, userAgent } from "./wire"
 import { connectViaProxy, markProxyFailure, nextProxy, type Proxy } from "./proxy"
-import { egressProxies } from "./egress"
+import { dropTunnelByProxy, egressProxies } from "./egress"
 import { appendFileSync } from "node:fs"
 import { buildRequestHead, readHttpResponse } from "./raw-http"
 
@@ -198,6 +198,9 @@ export async function harnessFetch(input: RequestInfo | URL, init?: RequestInit)
         return { proxy, socket }
       } catch {
         markProxyFailure(proxy)
+        // A tunnel whose SOCKS port is gone is objectively dead: drop its
+        // record so the next request respawns ssh (env proxies just strike).
+        if (proxy.raw.startsWith("socks5://127.0.0.1:")) dropTunnelByProxy(proxy)
       }
     }
   }

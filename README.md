@@ -46,9 +46,13 @@ very exploitable by anyone who owns more than one computer. If that's you:
    says so instead of pretending you gained a budget. If SSH fails, you get
    the actual error and the fix (`ssh-copy-id student@…`), not a shrug.
 
-Then it just works: free-tier requests round-robin across every live tunnel
-plus your direct connection. A tunnel that dies drops out of rotation and
-revives itself; `/egress off <host>` pauses one without deleting it,
+Then it just works. Free-tier requests round-robin across every live tunnel
+plus your direct connection — one request per hop, so two boxes means each
+carries about half. If a hop fails at connect time (tunnel wedged, machine
+asleep) the request immediately tries the next one and only falls back to your
+direct connection when every tunnel is down (`OMP_GO_PROXY_STRICT=1` makes
+that a hard error instead). A dead tunnel is dropped and respawned on the next
+request — it revives itself; `/egress off <host>` pauses one without deleting it,
 `/egress test` re-checks every host and prints egress IPs, `/egress remove`
 buries it. Tab-completion offers your `~/.ssh/config` hosts, because typing
 hostnames is not a skill anyone should need to exercise here.
@@ -101,6 +105,9 @@ Keep the written OK somewhere safe.
   `opencode-free/mimo-v2.6-flash-free`, assert the model's actual answer.
 - `bun test/e2e/egress-onboarding.mjs` drives the `/egress` onboarding itself
   under microsoft/tui-test: the dialog, the add, the egress-IP report.
+- `node test/e2e/egress-pool.mjs` proves the pool semantics in one session:
+  requests spread across both tunnels, one tunnel is killed mid-run, and the
+  next chat routes around it — still on tunnels, never a direct leak.
 - `node test/e2e/egress-free.mjs` is the full integration in a real terminal
   (microsoft/tui-test): the plugin opens the SSH tunnel from the host list,
   a free-tier chat completes in the TUI, and a wire log proves the chat was
