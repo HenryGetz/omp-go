@@ -5,7 +5,7 @@
 
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types"
 import { registerOpencodeGo, sessionIdentity } from "./register"
-import { writeModelsOverride } from "./models-config"
+import { ensureModelsOverride } from "./models-config"
 import { pinNewSession } from "./routing"
 import { trafficReport } from "./traffic"
 import {
@@ -41,7 +41,7 @@ export default function opencodeAuthExtension(pi: ExtensionAPI): void {
     // it only renews at login — silently reverting chats to the gateway's
     // low-effort default. Best-effort; the block is ours to own.
     try {
-      writeModelsOverride()
+      ensureModelsOverride()
     } catch {}
     if (!sessionId || routingPinned.has(sessionId)) return
     routingPinned.add(sessionId)

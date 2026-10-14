@@ -32,8 +32,8 @@ function gateSuffix(value: unknown): string {
   const text = JSON.stringify(value)
   if (ACCOUNT_GATE.test(text)) {
     return (
-      " (This is an account verdict, not a bad login: that account cannot serve this request " +
-      "(no funds, or not a member of this workspace). omp rotates to a healthy account when the pool has one.)"
+      " (This is a member verdict, not a bad login: that account cannot serve this request " +
+      "right now. omp rotates to a healthy account when the pool has one.)"
     )
   }
   return (
@@ -60,6 +60,41 @@ function reshape<T>(value: T): T {
     return out as T
   }
   return value
+}
+
+const GATE_NEUTRAL: Array<[RegExp, string]> = [
+  [/Insufficient account funds/gi, "account member out of service"],
+  [/Workspace access denied/gi, "workspace rejected this account"],
+  [/requires\s+Global\s+regions|Privacy settings/gi, "workspace policy blocks this model"],
+  [/no funds/gi, "out of service"],
+]
+
+/**
+ * Rewrite gate wording in a thrown error to classifier-safe text.
+ *
+ * pi-ai classifies (status, message) into AIError.Flag.UsageLimit; billing-cap
+ * wording on a 402 (`is402BillingCapBody`) parks omp's turn-recovery on a
+ * ~24-minute window and fails fast instead of retrying/rotating. The verdict
+ * record keeps the honest upstream wording; the thrown message must not match
+ * the classifier's vocabulary. Also clears the UsageLimit bit, which pi-ai set
+ * at error construction from the original wording.
+ */
+function neutralizeGateError(error: unknown): void {
+  const scrub = (value: unknown, depth = 0): unknown => {
+    if (typeof value === "string") {
+      let out = value
+      for (const [pattern, replacement] of GATE_NEUTRAL) out = out.replace(pattern, replacement)
+      return out
+    }
+    if (value == null || typeof value !== "object" || depth > 4) return value
+    if (Array.isArray(value)) return value.map((item) => scrub(item, depth + 1))
+    const record = value as Record<string, unknown>
+    for (const [key, entry] of Object.entries(record)) record[key] = scrub(entry, depth + 1)
+    return record
+  }
+  scrub(error)
+  const carrier = error as { id?: unknown; message?: unknown }
+  if (typeof carrier.id === "number") carrier.id &= ~0x0008_0000 // AIError.Flag.UsageLimit
 }
 
 /**
@@ -121,7 +156,13 @@ export function mapRegionGateErrors(source: AssistantMessageEventStream, token?:
           at: Date.now(),
         }, orgForToken(token))
       }
-      out.fail(reshape(error))
+      // Promote first (reshape copies the object and keys its 402->403
+      // rotation-lane rewrite on the original gate wording), then neutralize
+      // the COPY that is actually sent: the thrown message must stay outside
+      // pi-ai's usage-limit classifier vocabulary.
+      const promoted = reshape(error)
+      neutralizeGateError(promoted)
+      out.fail(promoted)
     }
   })()
   out.forwardLocalWorkFrom(source)

@@ -40,6 +40,17 @@ import { withStateLock } from "./state-lock"
 /** The host's own AuthStorage type, derived from the extension API namespace. */
 type HostAuth = Awaited<ReturnType<ExtensionAPI["pi"]["discoverAuthStorage"]>>
 
+// One AuthStorage handle per process: discovering it opens the credential
+// store, and session-start handlers run inside extension time budgets.
+let authHandle: Promise<HostAuth> | undefined
+function authStorage(api: ExtensionAPI): Promise<HostAuth> {
+  authHandle ??= api.pi.discoverAuthStorage().catch((error: unknown) => {
+    authHandle = undefined
+    throw error
+  })
+  return authHandle
+}
+
 /** New sessions stop joining an account once its worst window is this full. */
 const SPILL_AT_USED = spillAtUsed()
 
@@ -200,7 +211,7 @@ export async function pinNewSession(
   provider = "opencode-go",
 ): Promise<boolean> {
   if (!sessionId) return false
-  const auth = await api.pi.discoverAuthStorage()
+  const auth = await authStorage(api)
   const accounts = auth.oauth.accounts(provider, sessionId)
   // A resumed or inherited session already has its sticky credential: leave it
   // (drain-in-place), never re-pin over it.
@@ -308,7 +319,7 @@ export async function repinAfterVerdict(verdictOrgId: string | undefined, provid
   const pins = loadPins()
   const affected = pins.filter((pin) => pin.orgId === verdictOrgId)
   if (affected.length === 0) return
-  const auth = await hostApi.pi.discoverAuthStorage()
+  const auth = await authStorage(hostApi)
   const accounts = auth.oauth.accounts(provider)
   if (accounts.length === 0) return
   let health: Awaited<ReturnType<HostAuth["health"]["model"]>> | undefined

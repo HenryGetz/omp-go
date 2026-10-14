@@ -34,6 +34,7 @@ import {
 } from "./wire"
 
 const BEGIN = "# >>> omp-go managed block (do not edit) >>>"
+const STAMP = "# generated: "
 const END = "# <<< omp-go managed block <<<"
 // Provider-level body compat. `supportsReasoningEffort` is deliberately NOT
 // set here: the free lane's models come from the extension's own registration
@@ -95,6 +96,30 @@ function stableIds(): { session: string; project: string } {
       }
     }
   }
+}
+
+/**
+ * Session-start fast path: rewrite only when the managed block is missing or
+ * stale. The full rewrite takes the state lock and rewrites the file — too
+ * heavy for every session start (a slow start pushes sibling extension
+ * handlers past their timeout budget).
+ */
+export function ensureModelsOverride(
+  input: { orgId?: string; identity?: HarnessIdentity } = {},
+  maxAgeMs = 60 * 60 * 1000,
+): void {
+  try {
+    const content = readFileSync(modelsFile(), "utf8")
+    const at = content.indexOf(BEGIN)
+    const stop = content.indexOf(END, at)
+    if (at >= 0 && stop > at) {
+      const stamp = new RegExp(`${STAMP.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\d+)`).exec(content.slice(at, stop))
+      if (stamp && Date.now() - Number(stamp[1]) < maxAgeMs) return
+    }
+  } catch {
+    // Missing or unreadable: regenerate below.
+  }
+  writeModelsOverride(input)
 }
 
 export function writeModelsOverride(input: { orgId?: string; identity?: HarnessIdentity } = {}): void {
@@ -159,7 +184,7 @@ export function writeModelsOverride(input: { orgId?: string; identity?: HarnessI
       // wireStream's per-attempt injection.
     ].join("\n")
   })
-  const block = [BEGIN, "providers:", ...entries, END].join("\n")
+  const block = [BEGIN, `${STAMP}${Date.now()}`, "providers:", ...entries, END].join("\n")
 
   const file = modelsFile()
   withStateLock(() => {

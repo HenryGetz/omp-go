@@ -27,8 +27,18 @@ async function failureOf(source: AssistantMessageEventStream) {
   src.fail({ status: 402, message: "Upstream request failed: Insufficient account funds", type: "server_error" })
   const error = await failureOf(out)
   assert.equal(error?.status, 403, "402 promotes to the credential-rotation lane")
-  assert.match(error?.message ?? "", /account verdict/, "explains it is account-scoped")
-  assert.match(error?.message ?? "", /Insufficient account funds/, "keeps the upstream message")
+  assert.match(error?.message ?? "", /member verdict/, "explains it is account-scoped")
+  // Contract: the THROWN error must stay outside pi-ai's usage-limit classifier
+  // vocabulary (funds/quota/limit/plan/balance/...). Billing-cap wording on a
+  // 402 (is402BillingCapBody) parks omp's turn-recovery on a ~24-minute window
+  // and fails fast ("Provider requested ...ms wait, exceeds retry.maxDelayMs")
+  // instead of rotating. The honest upstream wording lives in the verdict
+  // record, not the thrown message.
+  assert.doesNotMatch(error?.message ?? "", /funds|balance|quota|limit|plan|billing|usage|spend|credit|exceed|exhaust/i, "thrown message avoids the usage-limit classifier")
+  const idCarrier = error as { id?: unknown } | null
+  if (typeof idCarrier?.id === "number") {
+    assert.equal(idCarrier.id & 0x0008_0000, 0, "UsageLimit flag cleared on the thrown error")
+  }
 }
 
 // 403 "Workspace access denied" -> guidance, stays rotatable
@@ -38,8 +48,8 @@ async function failureOf(source: AssistantMessageEventStream) {
   src.fail({ status: 403, message: "Workspace access denied", type: "permission_error" })
   const error = await failureOf(out)
   assert.equal(error?.status, 403)
-  assert.match(error?.message ?? "", /account verdict/)
-  assert.match(error?.message ?? "", /not a member of this workspace/)
+  assert.match(error?.message ?? "", /member verdict/)
+  assert.doesNotMatch(error?.message ?? "", /funds|balance|quota|limit|plan|billing|usage|spend|credit|exceed|exhaust/i, "thrown message avoids the usage-limit classifier")
 }
 
 // Wait hints leave with the verdict: the gateway's retry-after on a 402
