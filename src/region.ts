@@ -131,7 +131,11 @@ function stripWaitHintsFromError(value: unknown, depth = 0): void {
  * preserved: events, final result, and failures all forward unchanged apart
  * from the reshaped error payloads.
  */
-export function mapRegionGateErrors(source: AssistantMessageEventStream, token?: string): AssistantMessageEventStream {
+export function mapRegionGateErrors(
+  source: AssistantMessageEventStream,
+  token?: string,
+  orgId?: string,
+): AssistantMessageEventStream {
   const out = createAssistantMessageEventStream()
   void (async () => {
     try {
@@ -143,9 +147,14 @@ export function mapRegionGateErrors(source: AssistantMessageEventStream, token?:
       const text = JSON.stringify(error)
       if (REGION_GATE.test(text) || ACCOUNT_GATE.test(text)) {
         stripWaitHintsFromError(error)
+        // The serving org is known at request time; the token->org index is a
+        // fallback (and `token:` keys keep the verdict from being dropped when
+        // neither resolves — a silent no-op here meant "no verdict recorded",
+        // so no rotation ever happened).
+        const key = orgId ?? orgForToken(token) ?? (token ? `token:${token.slice(-8)}` : undefined)
         // Move sessions pinned to this account onto a healthy sibling now —
         // the next turn must not walk back into the same verdict.
-        void repinAfterVerdict(orgForToken(token))
+        void repinAfterVerdict(key)
         markAccountVerdict(token, {
           kind: /Insufficient account funds/i.test(text) ? "funds" : /Workspace access denied/i.test(text) ? "workspace" : "region",
           message: /Insufficient account funds/i.test(text)
@@ -154,7 +163,7 @@ export function mapRegionGateErrors(source: AssistantMessageEventStream, token?:
               ? "account is not a member of the attributed workspace"
               : "workspace policy blocks this model (Privacy not Global)",
           at: Date.now(),
-        }, orgForToken(token))
+        }, key)
       }
       // Promote first (reshape copies the object and keys its 402->403
       // rotation-lane rewrite on the original gate wording), then neutralize

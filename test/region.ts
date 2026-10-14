@@ -5,7 +5,7 @@
 import assert from "node:assert/strict"
 import { createAssistantMessageEventStream, type AssistantMessageEventStream } from "@oh-my-pi/pi-ai"
 import { mapRegionGateErrors } from "../src/region"
-import { accountVerdict, clearAccountVerdicts, markAccountVerdict, VERDICT_TTL_MS } from "../src/verdicts"
+import { accountVerdict, clearAccountVerdicts, markAccountVerdict, orgVerdict, VERDICT_TTL_MS } from "../src/verdicts"
 import { opencodeGoUsageProvider } from "../src/usage"
 
 async function failureOf(source: AssistantMessageEventStream) {
@@ -138,3 +138,17 @@ async function failureOf(source: AssistantMessageEventStream) {
 }
 
 console.log("ACCOUNT-GATE OK: denials rotate, demote the account in health, and heal on TTL")
+
+// The verdict MUST land under a stable key even when the token->org index is
+// empty: a silently dropped verdict meant "no rotation ever happens" - every
+// retry walked back into the same dry account while verdicts.json stayed empty.
+{
+  clearAccountVerdicts()
+  const src = createAssistantMessageEventStream()
+  const out = mapRegionGateErrors(src, "tok-secret-abcdef", "org_known")
+  src.fail({ status: 402, message: "Upstream request failed: Insufficient account funds", type: "server_error" })
+  await failureOf(out)
+  const landed = orgVerdict("org_known") ?? accountVerdict("token:abcdef")
+  assert.ok(landed, "gate failure lands a verdict under a stable key")
+  assert.equal(landed?.kind, "funds")
+}

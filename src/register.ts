@@ -36,7 +36,7 @@ import type { Api, Model, SimpleStreamOptions, Context, AssistantMessageEventStr
 import { providerOverride, refreshConsoleConfig } from "./console-config"
 import { mapRegionGateErrors } from "./region"
 import { writeModelsOverride } from "./models-config"
-import { OpencodeOAuthProvider, orgForToken } from "./opencode-provider"
+import { indexTokenOrg, OpencodeOAuthProvider, orgForToken } from "./opencode-provider"
 import { catalogModels, fetchCatalogModels, fetchFreeModels, freeModels, usesResponsesAPI } from "./models"
 import { OPENCODE_GO_PROVIDER, opencodeGoUsageProvider } from "./usage"
 import {
@@ -98,6 +98,9 @@ function wireStream(providerID: string, identity: HarnessIdentity, consoleBase: 
     // resolution index (orgForToken) which is keyed by the exact bearer sent.
     const token = typeof streamOptions?.apiKey === "string" ? streamOptions.apiKey : undefined
     const orgId = streamOptions?.oauthIdentity?.orgId ?? orgForToken(token)
+    // Remember the exact bearer -> org pair for every later derivation
+    // (verdicts, re-pinning, debug): the catch path only has the token.
+    if (token && orgId) indexTokenOrg(token, orgId)
     if (process.env.OMP_ORG_DEBUG)
       try {
         appendFileSync(
@@ -180,6 +183,7 @@ function wireStream(providerID: string, identity: HarnessIdentity, consoleBase: 
         },
       } as SimpleStreamOptions),
       token,
+      orgId,
     )
   }
 }
