@@ -5,6 +5,7 @@
 
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types"
 import { registerOpencodeGo, sessionIdentity } from "./register"
+import { trafficReport } from "./traffic"
 import {
   addEgressFlow,
   addHost,
@@ -27,9 +28,9 @@ export default function opencodeAuthExtension(pi: ExtensionAPI): void {
   registerOpencodeGo(pi)
   pi.registerCommand("egress", {
     description:
-      "Route free-tier traffic through your own machines — /egress [add <ssh-target>|remove <ssh-target>|on|off <ssh-target>|test|list]",
+      "Route free-tier traffic through your own machines — /egress [add <ssh-target>|remove <ssh-target>|on|off <ssh-target>|test|traffic|list]",
     getArgumentCompletions: (prefix) => {
-      const words = ["list", "add", "remove", "on", "off", "test"]
+      const words = ["list", "add", "remove", "on", "off", "test", "traffic"]
       const targets = [...new Set([...listHosts().map((h) => h.target), ...sshConfigHosts()])]
       const args = prefix.split(/\s+/)
       const options = args.length > 1 ? targets : [...words, ...targets]
@@ -88,8 +89,11 @@ export default function opencodeAuthExtension(pi: ExtensionAPI): void {
           ctx.ui.notify(await testEgressFlow(), "info")
           break
         }
+        case "traffic":
+          ctx.ui.notify(trafficReport(), "info")
+          break
         default:
-          ctx.ui.notify(`unknown subcommand '${verb}' — try list/add/remove/on/off/test`, "warning")
+          ctx.ui.notify(`unknown subcommand '${verb}' — try list/add/remove/on/off/test/traffic`, "warning")
       }
     },
   })

@@ -54,7 +54,19 @@ const FREE_COMPAT = {
   supportsStore: false,
 } as const
 
+/**
+ * Models the catalog routes through OpenAI's Responses API (`provider.npm:
+ * "@ai-sdk/openai"`) — the gateway rejects them on chat/completions with
+ * `ModelProtocolUnsupported`. The harness sends these to `/responses`.
+ */
+const responsesModels = new Set<string>()
+
+export function usesResponsesAPI(id: string): boolean {
+  return responsesModels.has(id)
+}
+
 export function toProviderModel(id: string, model: CatalogModel): ProviderModelConfig {
+  if ((model as { provider?: { npm?: string } }).provider?.npm === "@ai-sdk/openai") responsesModels.add(id)
   const input = (model.modalities?.input ?? ["text"]).filter(
     (modality): modality is "text" | "image" => modality === "text" || modality === "image",
   )

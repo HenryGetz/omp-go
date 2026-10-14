@@ -64,6 +64,34 @@ fine). Hosts live in `~/.omp/agent/omp-go-egress.json`.
 The devs are aware of and fine with multi-machine use. They said nice things.
 Keep the written OK somewhere safe.
 
+## Traffic & limits
+
+The free tier has no usage API. Not "not documented" — not there: responses
+carry no quota headers (just routing info like `x-opencode-endpoint-id`), and
+`/usage`, `/limits`, `/quota` all 404. There is no account to query because
+there is no account. Metering is per endpoint and only announces itself when
+you trip it (a `FreeTierError` or a throttle).
+
+So the plugin keeps its own books:
+
+```
+/egress traffic
+  148 requests, 2.3 MB sent, last 2026-10-14T00:20:45.123Z
+  by hop:
+    socks5://127.0.0.1:34999: 71
+    socks5://127.0.0.1:39591: 68
+    direct: 9
+  by model:
+    mimo-v2.6-flash-free: 121
+    longcat-2.5-preview-free: 27
+```
+
+Every request is recorded with the hop that carried it
+(`~/.omp/agent/omp-go-traffic.ndjson` — set `OMP_GO_WIRE_LOG` to redirect).
+That is also how the tests prove traffic went through your tunnels and not
+around them. For the Go subscription, `omp usage` still shows the real 5h /
+weekly / monthly windows.
+
 ## What it does
 
 - **Login.** The real device flow, byte-for-byte the one `opencode auth login`
@@ -85,6 +113,14 @@ Keep the written OK somewhere safe.
   false`), because bun's fetch sorts headers and the free-tier gateway checks.
   Golden-trace parity against the real harness enforces the rest.
 
+A handful of catalog entries drift dead upstream without warning (right now:
+`exo-free` answers `410 ModelDeprecated`, `ling-3.0-flash-fin-free` is
+unavailable, `ling-3.1-flash-free` is rate-limited). The harness's own picker
+shows them too — `bun test/gateway-sweep.ts` keeps the list honest and proves
+every other model routes on its correct protocol (yes, some free models are
+Responses-API, and yes, the gateway will tell you exactly that if you send
+them down the wrong one).
+
 ## Proof
 
 - `bun test/parity.ts` diffs this plugin's requests against a 15-request trace
@@ -95,6 +131,9 @@ Keep the written OK somewhere safe.
   encoding.
 - `bun test/proxy.ts` pins the egress pool: proxy parsing, round-robin
   failover, and the SOCKS5 tunnel handshake.
+- `bun test/gateway-sweep.ts` chats with every free model on the real gateway,
+  on its correct protocol — the anti-"model does not support this protocol"
+  sweep.
 - `bun test/gateway-free.ts` runs real `omp`, no login, `opencode-free/*`
   against the real gateway — the user-visible scenario end to end. With
   `EGRESS_CONFIG=1` it also proves the plugin opens its own tunnels from the

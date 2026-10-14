@@ -28,6 +28,7 @@ import type {
 // exports; `./stream` matches pi-ai's `./*` catch-all, so a compiled host cannot
 // resolve it and the extension fails to load ("Cannot find package
 // '@oh-my-pi/pi-ai'"). The root re-exports `streamSimple` (`export * from "./stream"`).
+import { buildModel } from "@oh-my-pi/pi-catalog/build"
 import { streamSimple } from "@oh-my-pi/pi-ai"
 import { harnessFetch } from "./ordered-fetch"
 import type { Api, Model, SimpleStreamOptions, Context, AssistantMessageEventStream } from "@oh-my-pi/pi-ai"
@@ -35,7 +36,7 @@ import { providerOverride, refreshConsoleConfig } from "./console-config"
 import { mapRegionGateErrors } from "./region"
 import { writeModelsOverride } from "./models-config"
 import { OpencodeOAuthProvider } from "./opencode-provider"
-import { catalogModels, fetchCatalogModels, fetchFreeModels, freeModels } from "./models"
+import { catalogModels, fetchCatalogModels, fetchFreeModels, freeModels, usesResponsesAPI } from "./models"
 import { OPENCODE_GO_PROVIDER, opencodeGoUsageProvider } from "./usage"
 import {
   CONSOLE_BASE,
@@ -103,12 +104,37 @@ function wireStream(providerID: string, identity: HarnessIdentity, consoleBase: 
         : {}
     // pi-ai resolves the wire URL from `model.baseUrl` (openai-shared.ts);
     // settings is kept intact for compat fields.
-    const routed = Object.assign(Object.create(Object.getPrototypeOf(model)), model, {
-      api: UPSTREAM_API,
-      ...(override.baseURL ? { baseUrl: override.baseURL, settings: existingSettings } : {}),
-    }) as Model<typeof UPSTREAM_API>
+    // Per-model protocol: Responses-API models are rejected on
+    // chat/completions (ModelProtocolUnsupported) — the catalog marks them
+    // with `provider.npm: "@ai-sdk/openai"`. Their compat must be fully
+    // resolved (the responses path reads fields like
+    // connectionBoundNativeHistory), so build them through pi-catalog's
+    // resolver instead of carrying our sparse subset.
+    const routed = usesResponsesAPI(model.id)
+      ? buildModel({
+          id: model.id,
+          name: model.name,
+          provider: model.provider,
+          api: "openai-responses",
+          baseUrl: override.baseURL ?? model.baseUrl,
+          cost: model.cost,
+          contextWindow: model.contextWindow,
+          maxTokens: model.maxTokens,
+          reasoning: model.reasoning,
+          input: model.input,
+          compat: {
+            supportsStore: true,
+            supportsUsageInStreaming: true,
+            supportsReasoningEffort: false,
+            reasoningContentField: "reasoning_content",
+          },
+        } as never)
+      : (Object.assign(Object.create(Object.getPrototypeOf(model)), model, {
+          api: UPSTREAM_API,
+          ...(override.baseURL ? { baseUrl: override.baseURL, settings: existingSettings } : {}),
+        }) as Model<typeof UPSTREAM_API>)
     return mapRegionGateErrors(
-      streamSimple(routed, context as Context, {
+      streamSimple(routed as Model<typeof UPSTREAM_API>, context as Context, {
         ...streamOptions,
         // Harness-order transport (src/ordered-fetch.ts): the free-tier gateway
         // validates session-id encoding, and the harness's exact wire order keeps

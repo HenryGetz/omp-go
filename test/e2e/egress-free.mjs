@@ -73,7 +73,7 @@ try {
   const entries = existsSync(wireLog)
     ? readFileSync(wireLog, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
     : []
-  const chat = entries.filter((entry) => entry.url.includes("/chat/completions"))
+  const chat = entries.filter((entry) => entry.path.includes("/chat/completions"))
   note(chat.length > 0, "wire log recorded the chat request")
   const viaTunnel = chat.filter((entry) => entry.hop.startsWith("socks5://"))
   note(viaTunnel.length > 0, `chat carried by the SSH tunnel (${viaTunnel[0]?.hop ?? "none"})`)

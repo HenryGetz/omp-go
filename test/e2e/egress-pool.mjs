@@ -79,7 +79,7 @@ try {
           .split("\n")
           .filter(Boolean)
           .map((line) => JSON.parse(line))
-          .filter((entry) => entry.url.includes("/chat/completions"))
+          .filter((entry) => entry.path.includes("/chat/completions"))
       : []
 
   note(await waitFor("v18.", 90_000), "omp starts (fresh profile, two egress hosts seeded)")
