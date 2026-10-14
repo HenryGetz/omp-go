@@ -131,6 +131,31 @@ function stripWaitHintsFromError(value: unknown, depth = 0): void {
  * preserved: events, final result, and failures all forward unchanged apart
  * from the reshaped error payloads.
  */
+/**
+ * Handle one account/region gate failure in either shape the stream produces:
+ * a thrown rejection (the catch) or an in-stream `type: "error"` EVENT (which
+ * used to be only reshaped - no verdict, no neutralize, no hint strip - so
+ * every retry walked back into the same dry account while the host parked on
+ * the classifier's quota window).
+ */
+function handleGateFailure(carrier: unknown, token?: string, orgId?: string): void {
+  const text = JSON.stringify(carrier)
+  if (!REGION_GATE.test(text) && !ACCOUNT_GATE.test(text)) return
+  stripWaitHintsFromError(carrier)
+  const key = orgId ?? orgForToken(token) ?? (token ? `token:${token.slice(-8)}` : undefined)
+  void repinAfterVerdict(key)
+  markAccountVerdict(token, {
+    kind: /Insufficient account funds/i.test(text) ? "funds" : /Workspace access denied/i.test(text) ? "workspace" : "region",
+    message: /Insufficient account funds/i.test(text)
+      ? "account cannot serve: insufficient funds (upstream)"
+      : /Workspace access denied/i.test(text)
+        ? "account is not a member of the attributed workspace"
+        : "workspace policy blocks this model (Privacy not Global)",
+    at: Date.now(),
+  }, key)
+  neutralizeGateError(carrier)
+}
+
 export function mapRegionGateErrors(
   source: AssistantMessageEventStream,
   token?: string,
@@ -139,38 +164,32 @@ export function mapRegionGateErrors(
   const out = createAssistantMessageEventStream()
   void (async () => {
     try {
-      for await (const event of source) out.push(reshape(event) as AssistantMessageEvent)
+      for await (const event of source) {
+        const mapped = reshape(event) as AssistantMessageEvent
+        // In-stream failures arrive as `type: "error"` events; they need the
+        // same verdict/neutralize handling as a thrown rejection.
+        if ((event as { type?: unknown }).type === "error") {
+          // Clean the caller's own event carrier too (its cause chain is a
+          // live reference), then handle the copy being forwarded.
+          stripWaitHintsFromError(event)
+          handleGateFailure(mapped, token, orgId)
+        }
+        out.push(mapped)
+      }
       out.end(await source.result())
     } catch (error) {
       // Record the verdict so the health layer demotes this account: the
       // pooler must stop preferring a broken 0%-usage account.
-      const text = JSON.stringify(error)
-      if (REGION_GATE.test(text) || ACCOUNT_GATE.test(text)) {
-        stripWaitHintsFromError(error)
-        // The serving org is known at request time; the token->org index is a
-        // fallback (and `token:` keys keep the verdict from being dropped when
-        // neither resolves — a silent no-op here meant "no verdict recorded",
-        // so no rotation ever happened).
-        const key = orgId ?? orgForToken(token) ?? (token ? `token:${token.slice(-8)}` : undefined)
-        // Move sessions pinned to this account onto a healthy sibling now —
-        // the next turn must not walk back into the same verdict.
-        void repinAfterVerdict(key)
-        markAccountVerdict(token, {
-          kind: /Insufficient account funds/i.test(text) ? "funds" : /Workspace access denied/i.test(text) ? "workspace" : "region",
-          message: /Insufficient account funds/i.test(text)
-            ? "account cannot serve: insufficient funds (upstream)"
-            : /Workspace access denied/i.test(text)
-              ? "account is not a member of the attributed workspace"
-              : "workspace policy blocks this model (Privacy not Global)",
-          at: Date.now(),
-        }, key)
-      }
       // Promote first (reshape copies the object and keys its 402->403
-      // rotation-lane rewrite on the original gate wording), then neutralize
-      // the COPY that is actually sent: the thrown message must stay outside
-      // pi-ai's usage-limit classifier vocabulary.
+      // rotation-lane rewrite on the original gate wording), then handle the
+      // COPY that is actually sent: hints stripped, verdict landed, wording
+      // kept outside pi-ai's usage-limit classifier vocabulary.
       const promoted = reshape(error)
-      neutralizeGateError(promoted)
+      // reshape copies deeply, so clean BOTH carriers: the caller's object
+      // (its cause chain is a live reference callers assert against) and the
+      // copy that is actually sent.
+      stripWaitHintsFromError(error)
+      handleGateFailure(promoted, token, orgId)
       out.fail(promoted)
     }
   })()
