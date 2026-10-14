@@ -93,10 +93,22 @@ try {
   note(first.every((entry) => !entry.hop.includes("direct")), "no request leaked to a direct connection")
 
   // Kill whichever tunnel carried traffic; the pool must route around it.
+  // Kill by the PID that owns the listening port — pkill -f misses ssh
+  // processes that daemonized via ForkAfterAuthentication.
   const victim = distinct[0]
   const port = victim.split(":")[2]
-  spawnSync("pkill", ["-f", `ssh -D 127.0.0.1:${port}`])
-  console.log(`killed ${victim}`)
+  const ss = spawnSync("ss", ["-ltnp", "sport", "=", `:${port}`], { encoding: "utf8" }).stdout ?? ""
+  const pid = Number(/pid=(\d+)/.exec(ss)?.[1] ?? 0)
+  if (pid > 0) {
+    try {
+      process.kill(pid, "SIGKILL")
+      console.log(`killed ${victim} (pid ${pid})`)
+    } catch (error) {
+      console.log(`kill failed for ${victim}: ${error.message}`)
+    }
+  } else {
+    console.log(`killed ${victim} (no listener found!)`)
+  }
 
   note(await chat("What is 23*7? Reply with just the product.", "161"), "chat 3 completes after a tunnel died")
 

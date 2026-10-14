@@ -1,7 +1,7 @@
 {
   "name": "omp-go",
-  "version": "0.9.2",
-  "description": "OpenCode for Oh My Pi: the Go subscription and OpenCode's free tier (keyless) \u2014 wire-identical to the opencode harness.",
+  "version": "1.0.0",
+  "description": "OpenCode for Oh My Pi: the Go subscription and the keyless free tier (10 verified models, both wire protocols) with multi-machine egress \u2014 wire-identical to the opencode harness.",
   "type": "module",
   "main": "./src/index.ts",
   "omp": {
