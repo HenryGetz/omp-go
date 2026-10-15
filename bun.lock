@@ -1,0 +1,29 @@
+{
+  "lockfileVersion": 2,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "omp-go",
+      "devDependencies": {
+        "@microsoft/tui-test": "^0.1.0",
+      },
+    },
+  },
+  "packages": {
+    "@microsoft/tui-test": ["@microsoft/tui-test@0.1.0", "", { "optionalDependencies": { "@microsoft/tui-test-darwin-arm64": "0.1.0", "@microsoft/tui-test-darwin-x64": "0.1.0", "@microsoft/tui-test-linux-arm64-gnu": "0.1.0", "@microsoft/tui-test-linux-arm64-musl": "0.1.0", "@microsoft/tui-test-linux-x64-gnu": "0.1.0", "@microsoft/tui-test-linux-x64-musl": "0.1.0", "@microsoft/tui-test-win32-x64-msvc": "0.1.0" } }, "sha512-nzIzoV8nFJjzzLVxoqxAdBAK+hhs10bGdgNNgp0rm5brJ1GXfYPwf4xMzL1FHRT2EV6zQmMykfLbxDhSeyQ8jg=="],
+
+    "@microsoft/tui-test-darwin-arm64": ["@microsoft/tui-test-darwin-arm64@0.1.0", "", { "os": "darwin", "cpu": "arm64" }, "sha512-yhy3AwPzuoONthY2+3EolvoHF/RYc5BPIFQkcmWdpPmzRl14yNTtGuBofJ+upOoZC6WRg42JHm8Uc3y4OZJx3g=="],
+
+    "@microsoft/tui-test-darwin-x64": ["@microsoft/tui-test-darwin-x64@0.1.0", "", { "os": "darwin", "cpu": "x64" }, "sha512-dSf8V4zdTDkliderHD8DCganNrKfztUdV7diXM3qP33nA/rJyqRrlOWmdggKfnca4fJt0h7/mlKO3DOS8rF8Mw=="],
+
+    "@microsoft/tui-test-linux-arm64-gnu": ["@microsoft/tui-test-linux-arm64-gnu@0.1.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-nbEF8qWjiqtyhvYHubG+Avznx6dHpaOePC5BrMme1He90tNiFajFFAZUOpXYcQWYaEdR29hxdb2V3DF4BjOgag=="],
+
+    "@microsoft/tui-test-linux-arm64-musl": ["@microsoft/tui-test-linux-arm64-musl@0.1.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-Te0uRVpFu+TyDzYDNp5UqMEEFpHYa21n0LDFR7HAlWSdWlD4fu6W4xRkzm/T8aWHdiJke6vZHBTIAjMcaCGejw=="],
+
+    "@microsoft/tui-test-linux-x64-gnu": ["@microsoft/tui-test-linux-x64-gnu@0.1.0", "", { "os": "linux", "cpu": "x64" }, "sha512-BHAtqIH/V00AWy7Zcef7s11XTzNCkz/BPR7rd3Mv+0axiHcjRI/ceCzuVJDnk8kd4ZO7RAxlpxYd43HWmvj3sw=="],
+
+    "@microsoft/tui-test-linux-x64-musl": ["@microsoft/tui-test-linux-x64-musl@0.1.0", "", { "os": "linux", "cpu": "x64" }, "sha512-xIBbZH/rHyzlBGn7//VJbCaGcwRZdHJrBs6/2vbRnN+TDAd7XdNplPdGxJ0fjIDcgDedRNWaoaIV5JYmerNkqA=="],
+
+    "@microsoft/tui-test-win32-x64-msvc": ["@microsoft/tui-test-win32-x64-msvc@0.1.0", "", { "os": "win32", "cpu": "x64" }, "sha512-BmgGrH7WdxAWUYakENpofKnPmtHG2scqghWk6BtTIMGE8aYaLFJhVuEQVQYBDdQXQhXrT627XfUrv3kOIc7vpw=="],
+  }
+}

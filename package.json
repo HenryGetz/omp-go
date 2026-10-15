@@ -1,6 +1,6 @@
 {
   "name": "omp-go",
-  "version": "1.3.3",
+  "version": "1.3.4",
   "description": "OpenCode for Oh My Pi: the Go subscription and the keyless free tier (10 verified models, both wire protocols) with cache-first account routing and multi-machine egress \u2014 wire-identical to the opencode harness.",
   "type": "module",
   "main": "./src/index.ts",
@@ -30,5 +30,8 @@
   "scripts": {
     "test": "bun test/parity.ts && bun test/transport.ts && bun test/proxy.ts && bun test/traffic.ts && bun test/region.ts",
     "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@microsoft/tui-test": "^0.1.0"
   }
 }
