@@ -64,6 +64,25 @@ const UPSTREAM_API = "openai-completions"
 /** OpenCode free-tier provider id — free models only, never asks for a key. */
 export const FREE_PROVIDER = "opencode-free"
 
+/**
+ * The plugin's own provider ids — the lanes whose traffic must carry the
+ * harness fingerprint. Routing for `streamSimple` is keyed on the PROVIDER,
+ * never on `model.api`: a model resolved through the host's model REGISTRY
+ * (pi-catalog's built-in `opencode-go` rows carry `api: "openai-completions"`,
+ * and that is what a preset's `pi.setModel` hands over) would fail an
+ * `api === WIRE_API` check and drop out of the wrapper — no per-request
+ * `x-opencode-org-id`, no fingerprint, no region-gate mapping, so the gateway
+ * attributes the request by bearer alone and answers
+ * `402 Upstream request failed: Insufficient account funds`.
+ */
+export function isOurWireProvider(providerID: string | undefined): boolean {
+  // `opencode-zen` is the built-in alias family for the same upstream Go
+  // subscription (pi-catalog's bundled provider; its models-v3 cache row is
+  // what a REGISTRY-resolved `opencode-go/<id>` reference can land on). Those
+  // rows must ride the wire wrapper too, or they leave attribution behind.
+  return providerID === OPENCODE_GO_PROVIDER || providerID === FREE_PROVIDER || providerID === "opencode-zen"
+}
+
 // The Console device-flow login is filed by the `opencode` registration's
 // `config.oauth` (id = provider name; pi-catalog has no built-in `opencode`
 // login to shadow it), with `storeCredentialsAs` routing the grant under
@@ -89,9 +108,41 @@ export const sessionIdentity: SessionIdentity = {
 }
 sessionIdentity.affinity = sessionIdentity.session
 
+/**
+ * Single-source org attribution for one request. The serving credential's own
+ * org (resolved per attempt in `wireStream`) is the ONLY `x-opencode-org-id`
+ * that may reach the wire: the Console-config cache is per org but its
+ * `headers` carry that org's stamp, and a bearer paired with an org it is not a
+ * member of is exactly what the gateway answers with
+ * `402 … Insufficient account funds` / `403 Workspace access denied`. Any
+ * foreign stamp (another account's cached snapshot, a pipeline default) is
+ * dropped, and no org header is sent at all when none resolves.
+ */
+export function withServingOrg(
+  headers: Record<string, string | undefined>,
+  orgId: string | undefined,
+): Record<string, string> {
+  const merged: Record<string, string> = {}
+  for (const [name, value] of Object.entries(headers)) {
+    if (value === undefined) continue
+    if (name.toLowerCase() === "x-opencode-org-id" && value !== orgId) continue
+    merged[name] = value
+  }
+  if (orgId) merged["x-opencode-org-id"] = orgId
+  return merged
+}
+
 /** Per-request fingerprint + Console-config merge, shared by both providers. */
 function wireStream(providerID: string, identity: HarnessIdentity, consoleBase: string | undefined) {
   return (model: Model<Api>, context: Context, streamOptions?: SimpleStreamOptions): AssistantMessageEventStream => {
+    // Our OWN providers' models always ride this wrapper, whatever `model.api`
+    // carries: the projected `WIRE_API` on the default path, or the built-in
+    // `openai-completions` / `openai-responses` a REGISTRY-resolved row keeps
+    // (see isOurWireProvider). An `api`-based guard here is exactly what
+    // dropped those rows out of the fingerprint. Foreign providers are never
+    // swallowed — delegate them untouched to the built-in protocol. A model
+    // carrying no provider id at all belongs to this closure's lane.
+    if (!isOurWireProvider(model.provider ?? providerID)) return streamSimple(model, context, streamOptions)
     // The org MUST be the serving credential's own: the gateway rejects a
     // token paired with an org it is not a member of ("Workspace access
     // denied"). Prefer the pipeline's identity; fall back to the credential
@@ -108,7 +159,10 @@ function wireStream(providerID: string, identity: HarnessIdentity, consoleBase: 
           `${JSON.stringify({ apiKeyType: typeof streamOptions?.apiKey, token: token ? `...${token.slice(-6)}` : "none", org: orgId ?? "none" })}\n`,
         )
       } catch {}
-    const override = providerOverride(orgId, providerID)
+    // The custom-API registry is keyed by the shared WIRE_API id, so this
+    // closure is whichever of the two providers registered last — resolve the
+    // Console override (endpoint + pushed headers) from the MODEL's own lane.
+    const override = providerOverride(orgId, model.provider ?? providerID)
     // Keep the Console config mirror warm: the harness polls /api/v2/config
     // every minute and merges pushed headers/endpoints; we do the same.
     if (token)
@@ -129,14 +183,18 @@ function wireStream(providerID: string, identity: HarnessIdentity, consoleBase: 
     // with `provider.npm: "@ai-sdk/openai"`. Their compat must be fully
     // resolved (the responses path reads fields like
     // connectionBoundNativeHistory), so build them through pi-catalog's
-    // resolver instead of carrying our sparse subset.
-    const routed = usesResponsesAPI(model.id)
+    // resolver instead of carrying our sparse subset. A REGISTRY-resolved row
+    // already carrying the built-in `openai-responses` api takes this path too.
+    const viaResponses = usesResponsesAPI(model.id) || model.api === "openai-responses"
+    const routed = viaResponses
       ? buildModel({
           id: model.id,
           name: model.name,
           provider: model.provider,
           api: "openai-responses",
-          baseUrl: override.baseURL ?? model.baseUrl,
+          // Mirror the harness: inference targets the catalog URL (zen/go/v1),
+          // never the Console-pushed /inference/go/... proxy path.
+          baseUrl: model.baseUrl ?? override.baseURL,
           cost: model.cost,
           contextWindow: model.contextWindow,
           maxTokens: model.maxTokens,
@@ -157,14 +215,14 @@ function wireStream(providerID: string, identity: HarnessIdentity, consoleBase: 
         } as never)
       : (Object.assign(Object.create(Object.getPrototypeOf(model)), model, {
           api: UPSTREAM_API,
-          ...(override.baseURL ? { baseUrl: override.baseURL, settings: existingSettings } : {}),
+          ...(existingSettings ? { settings: existingSettings } : {}),
         }) as Model<typeof UPSTREAM_API>)
     return mapRegionGateErrors(
       streamSimple(routed as Model<typeof UPSTREAM_API>, context as Context, {
         ...streamOptions,
         // Harness `responsesEffort` shape: summary "auto" rides every engaged
         // reasoning request on the Responses protocol.
-        ...(usesResponsesAPI(model.id) && !(streamOptions && "reasoningSummary" in streamOptions)
+        ...(viaResponses && !(streamOptions && "reasoningSummary" in streamOptions)
           ? { reasoningSummary: "auto" as const }
           : {}),
         // Harness-order transport (src/ordered-fetch.ts): the free-tier gateway
@@ -174,13 +232,22 @@ function wireStream(providerID: string, identity: HarnessIdentity, consoleBase: 
         // Fingerprint + Console-pushed headers win over anything static; the
         // org header attributes the request to the serving workspace exactly
         // as the harness's Console-driven provider does. Auth stays with the
-        // pipeline (see authHeader).
-        headers: {
-          ...streamOptions?.headers,
-          ...sessionHeaders(sessionIdentity, identity),
-          ...override.headers,
-          ...(orgId ? { "x-opencode-org-id": orgId } : {}),
-        },
+        // pipeline (see authHeader). The org is single-sourced here: every
+        // other `x-opencode-org-id` in the merge (pipeline default, another
+        // account's cached Console snapshot) is dropped.
+        // Mirror the harness exactly: the inference request carries Bearer +
+        // session/UA headers and NO org/workspace header (x-org-id rides only
+        // Console config/websearch/MCP calls in the harness - see
+        // plugin/provider/opencode.ts credentialHeaders). Any org stamp from a
+        // cached Console snapshot is dropped here.
+        headers: withServingOrg(
+          {
+            ...streamOptions?.headers,
+            ...sessionHeaders(sessionIdentity, identity),
+            ...override.headers,
+          },
+          undefined,
+        ),
       } as SimpleStreamOptions),
       token,
       orgId,
@@ -198,11 +265,11 @@ function wireStream(providerID: string, identity: HarnessIdentity, consoleBase: 
 function projectModels(models: Model<Api>[], credentials: { orgId?: string }) {
   return models.map((model) => {
     const providerID = model.provider
-    if (providerID !== OPENCODE_GO_PROVIDER && providerID !== FREE_PROVIDER) return model
+    if (!isOurWireProvider(providerID)) return model
     const override = providerOverride(credentials.orgId, providerID)
     return Object.assign(Object.create(Object.getPrototypeOf(model)), model, {
       api: WIRE_API,
-      ...(override.baseURL ? { baseUrl: override.baseURL } : {}),
+
       headers: {
         ...model.headers,
         // The org is NOT stamped here: projection-time credentials outlive the
@@ -230,6 +297,7 @@ export function registerOpencodeGo(
   const goConfig: ProviderConfig = {
     baseUrl: goBase,
     api: WIRE_API,
+
     authHeader: true,
     headers: { "user-agent": `opencode/${identity.channel}/${identity.version}/${identity.name}` },
     streamSimple: streamSimpleFor(OPENCODE_GO_PROVIDER),

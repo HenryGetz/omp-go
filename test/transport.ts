@@ -4,11 +4,13 @@
 // if one of them breaks, free-tier requests get `FreeTierError`.
 
 import assert from "node:assert/strict"
-import { mkdtempSync, readFileSync, readdirSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { assembleHeaders } from "../src/ordered-fetch"
+import { orgScopedHeaders } from "../src/console-config"
 import { writeModelsOverride } from "../src/models-config"
+import { WIRE_API, isOurWireProvider, withServingOrg } from "../src/register"
 import { isHarnessID } from "../src/identifier"
 
 const url = new URL("https://opencode.ai/inference/v1/chat/completions")
@@ -68,15 +70,103 @@ assert.equal(withOrg["x-opencode-org-id"], "org_42")
   const previousHome = process.env.HOME
   process.env.HOME = home
   try {
-    writeModelsOverride({ orgId: "wrk_01TESTWORKSPACE000000000000" })
+    // Pre-seed a foreign provider: the managed block must merge into the
+    // file's existing `providers:` map (a second top-level key loses whichever
+    // key wins in YAML) and still carry its own markers + stamp.
     const dir = path.join(home, ".omp", "agent")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      path.join(dir, "models.yml"),
+      "providers:\n  anthropic:\n    baseUrl: https://api.anthropic.com\n",
+      { mode: 0o600 },
+    )
+
+    writeModelsOverride({ orgId: "wrk_01TESTWORKSPACE000000000000" })
     const content = readFileSync(path.join(dir, readdirSync(dir).find((name) => name === "models.yml")!), "utf8")
     assert.ok(!content.includes("x-opencode-org-id"), "models.yml never stamps x-opencode-org-id")
     assert.ok(!content.includes("wrk_01TESTWORKSPACE"), "no org value leaks into the managed block")
     assert.ok(content.includes("x-session-id"), "attribution headers still present")
+    // Freshness stamp: `ensureModelsOverride` skips the state-lock rewrite only
+    // on a stamped block; a run that drops it makes every session start rewrite.
+    assert.match(content, /^# generated: \d+$/m, "managed block always carries the # generated: stamp")
+    // Per-model reasoning defaults: without `modelOverrides` every chat silently
+    // runs at the gateway's lightest effort rung.
+    assert.ok(content.includes("modelOverrides:"), "effort-capable catalog models get modelOverrides")
+    assert.match(content, /^ {6}"[^"]+":$/m, "modelOverrides carries per-model entries")
+    // Merge, not nest: the foreign provider survives and only one top-level map.
+    assert.ok(content.includes("anthropic:"), "foreign providers are preserved")
+    assert.equal(content.match(/^providers:$/gm)?.length, 1, "the block merges into one top-level providers map")
+    assert.ok(
+      content.includes("# >>> omp-go managed block (do not edit) >>>\n# generated: "),
+      "BEGIN marker is immediately followed by the stamp, before the providers map",
+    )
   } finally {
     process.env.HOME = previousHome
   }
 }
 
-console.log("TRANSPORT OK: header order/casing, session-id scheme, and no static org stamps")
+// Routing decision (src/register.ts `wireStream`): a model carrying the
+// built-in `openai-completions`/`openai-responses` api for one of OUR providers
+// must still be routed through the fingerprint wrapper. pi-catalog's built-in
+// `opencode-go` rows look exactly like this, and that is what a preset's
+// `pi.setModel` hands over — an `api === WIRE_API` guard would drop the
+// per-request `x-opencode-org-id` and the gateway would answer
+// `402 Insufficient account funds` for a funded account.
+const wireApi: string = WIRE_API
+assert.ok(wireApi !== "openai-completions" && wireApi !== "openai-responses", "WIRE_API is a custom, non-built-in id")
+assert.equal(isOurWireProvider("opencode-go"), true)
+assert.equal(isOurWireProvider("opencode-free"), true)
+assert.equal(isOurWireProvider("anthropic"), false, "foreign providers are never swallowed")
+assert.equal(isOurWireProvider(undefined), false)
+for (const api of [WIRE_API, "openai-completions", "openai-responses"]) {
+  const registryRow = { id: "deepseek-v4.1-flash", provider: "opencode-go", api } as const
+  assert.equal(
+    isOurWireProvider(registryRow.provider),
+    true,
+    `provider ${registryRow.provider} with api ${api} still rides the fingerprint wrapper`,
+  )
+}
+
+// Org attribution is single-sourced. The Console-config cache is per org, and a
+// fallback snapshot belongs to ANOTHER account: reusing its `x-opencode-org-id`
+// pairs this bearer with an org it is not a member of — the exact shape the
+// gateway answers with `402 … Insufficient account funds` / `403 Workspace
+// access denied` (reproduced against both real accounts).
+const fingerprint = { "user-agent": "opencode/latest/2.0.26/cli" }
+assert.deepEqual(
+  orgScopedHeaders({ ...fingerprint, "x-opencode-org-id": "wrk_OTHERACCOUNT" }, false),
+  fingerprint,
+  "a foreign snapshot contributes org-neutral values only",
+)
+assert.deepEqual(
+  orgScopedHeaders({ ...fingerprint, "X-Opencode-Org-Id": "wrk_OTHERACCOUNT" }, false),
+  fingerprint,
+  "the org stamp is dropped whatever its casing",
+)
+assert.deepEqual(
+  orgScopedHeaders({ "x-opencode-org-id": "wrk_MINE" }, true),
+  { "x-opencode-org-id": "wrk_MINE" },
+  "the org's own snapshot keeps its attribution",
+)
+
+// The request-time merge: only the serving credential's own org survives.
+{
+  const merged = withServingOrg(
+    { ...fingerprint, "x-opencode-org-id": "wrk_OTHERACCOUNT" },
+    "wrk_MINE",
+  )
+  assert.equal(merged["x-opencode-org-id"], "wrk_MINE", "the resolved serving org overrides a foreign stamp")
+  assert.equal(
+    Object.keys(merged).filter((name) => name.toLowerCase() === "x-opencode-org-id").length,
+    1,
+    "exactly one x-opencode-org-id reaches the wire",
+  )
+  assert.equal(merged["user-agent"], fingerprint["user-agent"], "fingerprint headers survive the merge")
+
+  // No resolved org: send none, never a stale foreign one.
+  const unowned = withServingOrg({ ...fingerprint, "x-opencode-org-id": "wrk_OTHERACCOUNT" }, undefined)
+  assert.ok(!("x-opencode-org-id" in unowned), "no org id resolved => no org header at all")
+  assert.equal(unowned["user-agent"], fingerprint["user-agent"], "fingerprint headers still sent without an org")
+}
+
+console.log("TRANSPORT OK: header order/casing, session-id scheme, no static org stamps, stamped+complete managed block")

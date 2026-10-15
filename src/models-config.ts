@@ -20,7 +20,13 @@ import { homedir } from "node:os"
 import path from "node:path"
 import { providerOverride } from "./console-config"
 import { withStateLock } from "./state-lock"
-import { GO_CATALOG, OPENCODE_CATALOG, thinkingOverrides } from "./models"
+import { GO_CATALOG, OPENCODE_CATALOG, thinkingOverrides, type CatalogEntry } from "./models"
+// Repo-local snapshots (what the runtime catalog is vendored from). The
+// managed block's `modelOverrides` must survive a catalog input that arrives
+// without `reasoning_options` (a network-flavored refresh): dropping them
+// silently reverts every chat to the gateway's lightest effort rung.
+import embeddedCatalog from "./models-catalog.json"
+import embeddedZenCatalog from "./models-zen-catalog.json"
 import {
   DEFAULT_IDENTITY,
   newTrace,
@@ -53,6 +59,19 @@ const PROVIDERS = [
     compat: HARNESS_BODY_COMPAT,
     catalog: GO_CATALOG,
   },
+  // The built-in alias family for the same Go tier (pi-catalog's bundled
+  // `opencode-zen` provider is what a REGISTRY-resolved reference can land
+  // on). Without a managed entry its rows ship WITHOUT the harness
+  // fingerprint headers and the gateway answers the bare-bearer request with
+  // `402 Upstream request failed: Insufficient account funds` - the exact
+  // post-/go failure.
+  {
+    id: "opencode-zen",
+    fallbackURL: ZEN_GO_BASE,
+    freeTier: false,
+    compat: HARNESS_BODY_COMPAT,
+    catalog: GO_CATALOG,
+  },
   // The free tier: zero-cost catalog models, keyless (`Bearer public`).
   {
     id: "opencode-free",
@@ -62,6 +81,31 @@ const PROVIDERS = [
     catalog: OPENCODE_CATALOG,
   },
 ] as const
+
+// Repo-local fallbacks for the catalog the PROVIDERS entries carry, keyed by
+// lane id.
+const EMBEDDED_CATALOGS: Record<string, CatalogEntry> = {
+  "opencode-go": embeddedCatalog as unknown as CatalogEntry,
+  "opencode-free": embeddedZenCatalog as unknown as CatalogEntry,
+}
+
+/**
+ * Per-model `thinking` defaults for one lane, with the repo-local catalog as a
+ * fallback: a catalog that carries no `reasoning_options` (network-flavored
+ * input, or a stripped build) would otherwise emit a block WITHOUT
+ * `modelOverrides`, silently losing the max-effort defaults.
+ */
+function laneThinkingOverrides(id: string, catalog: CatalogEntry) {
+  const overrides = thinkingOverrides(catalog)
+  if (overrides.length > 0) return overrides
+  const embedded = EMBEDDED_CATALOGS[id]
+  return embedded ? thinkingOverrides(embedded) : overrides
+}
+
+// True when any lane carries effort-capable models — the block then MUST
+// contain `modelOverrides`, or the defaults are lost / the stale block keeps
+// being treated as current.
+const EFFORT_CAPABLE = PROVIDERS.some(({ id, catalog }) => laneThinkingOverrides(id, catalog).length > 0)
 
 // Respect $HOME like every other tool (Bun's homedir() prefers /etc/passwd,
 // which breaks profile-isolated runs and tests).
@@ -99,10 +143,10 @@ function stableIds(): { session: string; project: string } {
 }
 
 /**
- * Session-start fast path: rewrite only when the managed block is missing or
- * stale. The full rewrite takes the state lock and rewrites the file — too
- * heavy for every session start (a slow start pushes sibling extension
- * handlers past their timeout budget).
+ * Session-start fast path: rewrite only when the managed block is missing,
+ * stale, or content-incomplete (see below). The full rewrite takes the state
+ * lock and rewrites the file — too heavy for every session start (a slow start
+ * pushes sibling extension handlers past their timeout budget).
  */
 export function ensureModelsOverride(
   input: { orgId?: string; identity?: HarnessIdentity } = {},
@@ -113,8 +157,15 @@ export function ensureModelsOverride(
     const at = content.indexOf(BEGIN)
     const stop = content.indexOf(END, at)
     if (at >= 0 && stop > at) {
-      const stamp = new RegExp(`${STAMP.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\d+)`).exec(content.slice(at, stop))
-      if (stamp && Date.now() - Number(stamp[1]) < maxAgeMs) return
+      const block = content.slice(at, stop)
+      const stamp = new RegExp(`${STAMP.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\d+)`).exec(block)
+      // A fresh stamp is not enough: a block that lost its `modelOverrides`
+      // (an interrupted rewrite, or a catalog input without `reasoning_options`)
+      // is stale content even when it was written moments ago — chats would run
+      // at the gateway's default effort. Regenerate on missing stamp OR missing
+      // overrides while the catalog has effort-capable models.
+      const complete = !EFFORT_CAPABLE || block.includes("modelOverrides:")
+      if (stamp && complete && Date.now() - Number(stamp[1]) < maxAgeMs) return
     }
   } catch {
     // Missing or unreadable: regenerate below.
@@ -132,10 +183,14 @@ export function writeModelsOverride(input: { orgId?: string; identity?: HarnessI
   const entries = PROVIDERS.map(({ id, fallbackURL, freeTier, compat, catalog }) => {
     const override = providerOverride(input.orgId, id)
     const orgId = input.orgId ?? override.headers["x-opencode-org-id"]
-    const thinking = thinkingOverrides(catalog)
+    const thinking = laneThinkingOverrides(id, catalog)
     return [
       `  ${id}:`,
-      `    baseUrl: ${(override.baseURL ?? fallbackURL).replace(/\/+$/, "")}`,
+      // Mirror the harness exactly: inference goes to the CATALOG url
+      // (https://opencode.ai/zen/go/v1 per models.dev), never the
+      // Console-pushed /inference/go/... proxy path - that one serves the
+      // Console's own config/websearch/MCP calls, not chat completions.
+      `    baseUrl: ${fallbackURL.replace(/\/+$/, "")}`,
       // The harness's unauthenticated free-tier key (OpencodePlugin sets
       // `apiKey: "public"` when no credential is present); the gateway accepts
       // it with the harness fingerprint, and a /login credential wins anyway.
@@ -184,7 +239,19 @@ export function writeModelsOverride(input: { orgId?: string; identity?: HarnessI
       // wireStream's per-attempt injection.
     ].join("\n")
   })
-  const block = [BEGIN, `${STAMP}${Date.now()}`, "providers:", ...entries, END].join("\n")
+  // The managed region always leads with its own markers: BEGIN, then the
+  // `# generated:` freshness stamp `ensureModelsOverride` reads, then the
+  // provider entries and the closing marker. Both emissions below carry them —
+  // a block without the stamp is treated as absent (and has silently made
+  // every session start take the full state-lock rewrite).
+  const stamp = `${STAMP}${Date.now()}`
+  const body = [...entries, END]
+  const block = [BEGIN, stamp, "providers:", ...body].join("\n")
+  // Same region without the `providers:` opener: when the file already has a
+  // top-level map for other providers we merge our entries into it instead of
+  // nesting a second `providers:` key (YAML readers fall back to whichever key
+  // wins, so staleness there is not cosmetic).
+  const entriesOnly = [BEGIN, stamp, ...body].join("\n")
 
   const file = modelsFile()
   withStateLock(() => {
@@ -195,18 +262,13 @@ export function writeModelsOverride(input: { orgId?: string; identity?: HarnessI
     content = ""
   }
   // Index-based removal (the markers contain regex metacharacters): strip every
-  // managed block, then append exactly one fresh block. Duplicate `providers:`
-  // maps make YAML readers fall back to whichever key wins, so staleness here
-  // is not cosmetic.
+  // managed block, then append exactly one fresh block.
   let withoutOurs = content
   for (let at = withoutOurs.indexOf(BEGIN); at >= 0; at = withoutOurs.indexOf(BEGIN)) {
     const stop = withoutOurs.indexOf(END, at)
     withoutOurs = stop < 0 ? withoutOurs.slice(0, at) : withoutOurs.slice(0, at) + withoutOurs.slice(stop + END.length)
   }
   withoutOurs = withoutOurs.replace(/\n{3,}/g, "\n\n").trimEnd()
-  // Our block carries its own `providers:` opener; when the file already has
-  // one for other providers, merge the entries instead of nesting a second map.
-  const entriesOnly = block.slice(block.indexOf("\n") + 1).replace(/^providers:\n/, "")
   const merged = withoutOurs.includes("providers:")
     ? `${withoutOurs}\n${entriesOnly}\n`
     : `${withoutOurs}${withoutOurs ? "\n\n" : ""}${block}\n`

@@ -148,6 +148,20 @@ export function assembleHeaders(url: URL, providedInit: HeaderInput, body: Buffe
 }
 
 export async function harnessFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  // Mirror the harness endpoint exactly: inference rides the catalog URL
+  // (/zen/go/v1/chat/completions - models.dev; the Console proxy maps
+  // /zen/go/v1/* upstream), never the Console-pushed /inference/go/openai/v1
+  // alias. See the opencode reference: packages/core/src/models-dev.ts +
+  // packages/console/app/src/lib/inference-proxy.ts.
+  if (typeof input === "string" || input instanceof URL) {
+    const raw = String(input)
+    input = raw.replace("/inference/go/openai/v1/", "/zen/go/v1/")
+  } else if (input && typeof input === "object" && "url" in input) {
+    const req = input as Request
+    const raw = req.url
+    const mapped = raw.replace("/inference/go/openai/v1/", "/zen/go/v1/")
+    if (mapped !== raw) input = new Request(mapped, req)
+  }
   const request = new Request(input as RequestInfo, init)
   const url = new URL(request.url)
   const method = (init?.method ?? request.method ?? "GET").toUpperCase()

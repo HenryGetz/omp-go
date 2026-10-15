@@ -34,23 +34,36 @@ function cacheFile(): string {
   return path.join(homedir(), ".omp", "agent", "omp-go-console-config.json")
 }
 
-function loadSnapshot(key: string): ConsoleConfigSnapshot | undefined {
+/**
+ * One org's cached Console config plus whether it really belongs to the
+ * requested key. A `false` here means the freshest-snapshot fallback matched
+ * ANOTHER account's entry: callers may use its org-neutral values (endpoint,
+ * harness fingerprint) but never its org attribution.
+ */
+type LoadedSnapshot = { snapshot: ConsoleConfigSnapshot; exact: boolean }
+
+function loadSnapshot(key: string): LoadedSnapshot | undefined {
   const cached = snapshots.get(key)
-  if (cached) return cached
+  if (cached) return { snapshot: cached, exact: true }
   try {
     const parsed = JSON.parse(readFileSync(cacheFile(), "utf8")) as Record<string, ConsoleConfigSnapshot>
     // Exact org first; otherwise the freshest entry — callers without an org
     // (registration-time writes) must still see the Console-driven endpoint
     // instead of silently regressing to the catalog URL.
-    const entry =
-      parsed[key] ??
-      Object.values(parsed)
-        .filter((candidate) => candidate?.providers)
-        .toSorted((a, b) => b.fetchedAt - a.fetchedAt)[0]
-    if (entry?.providers) {
-      snapshots.set(key, entry)
-      return entry
+    const exact = parsed[key]
+    if (exact?.providers) {
+      snapshots.set(key, exact)
+      return { snapshot: exact, exact: true }
     }
+    const freshestKey = Object.keys(parsed)
+      .filter((candidate) => parsed[candidate]?.providers)
+      .toSorted((a, b) => parsed[b].fetchedAt - parsed[a].fetchedAt)[0]
+    const entry = freshestKey === undefined ? undefined : parsed[freshestKey]
+    if (!entry?.providers) return undefined
+    // Memoize under the key it came from — memoizing it under ours would make
+    // the next refresh call believe this org has a fresh config and skip it.
+    snapshots.set(freshestKey, entry)
+    return { snapshot: entry, exact: false }
   } catch {
     // No cache yet; callers fall back to defaults and a refresh fills it.
   }
@@ -74,16 +87,32 @@ function saveSnapshot(key: string, snapshot: ConsoleConfigSnapshot): void {
   }
 }
 
+/**
+ * Attribution rule for a cached Console snapshot. Only the snapshot matching
+ * the requested org (`exact`) may contribute `x-opencode-org-id`; the
+ * freshest-entry fallback belongs to a FOREIGN account, whose org-neutral
+ * values (endpoint, harness fingerprint) are safe to reuse but whose org stamp
+ * is not — a bearer paired with an org it is not a member of is the gateway's
+ * `402 … Insufficient account funds`.
+ */
+export function orgScopedHeaders(headers: Record<string, string>, exact: boolean): Record<string, string> {
+  if (exact) return headers
+  const kept: Record<string, string> = {}
+  for (const [name, value] of Object.entries(headers))
+    if (name.toLowerCase() !== "x-opencode-org-id") kept[name] = value
+  return kept
+}
+
 export function providerOverride(orgId: string | undefined, providerID: string): ProviderOverride {
-  const snapshot = loadSnapshot(orgId ?? "default")
+  const loaded = loadSnapshot(orgId ?? "default")
   // The Console names the free/zen lane "opencode" (the harness's provider
   // id); we register it as "opencode-free". Missing the push means falling
   // back to the wrong endpoint path, which the free gateway rejects with
   // `FreeTierError` ("can only be used from within OpenCode").
   const key = providerID === "opencode-free" ? "opencode" : providerID
-  const provider = snapshot?.providers[key]
+  const provider = loaded?.snapshot.providers[key]
   return {
-    headers: provider?.headers ?? {},
+    headers: orgScopedHeaders(provider?.headers ?? {}, loaded?.exact !== false),
     baseURL: provider?.settings?.baseURL,
   }
 }
@@ -103,7 +132,9 @@ export function refreshConsoleConfig(input: {
 }): Promise<void> {
   const key = input.cacheKey ?? input.orgId ?? "default"
   const previous = loadSnapshot(key)
-  if (previous && Date.now() - previous.fetchedAt < TTL_MS) return Promise.resolve()
+  // Only the org's OWN snapshot proves it is fresh; a foreign fallback means
+  // this key has never been fetched and must be.
+  if (previous?.exact && Date.now() - previous.snapshot.fetchedAt < TTL_MS) return Promise.resolve()
   return fetchConsoleConfig(input.consoleBase, { token: input.token, orgId: input.orgId }, {
     identity: input.identity,
     fetch: input.fetch,
