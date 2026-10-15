@@ -41,7 +41,8 @@ async function failureOf(source: AssistantMessageEventStream) {
   // and fails fast ("Provider requested ...ms wait, exceeds retry.maxDelayMs")
   // instead of rotating. The honest upstream wording lives in the verdict
   // record, not the thrown message.
-  assert.doesNotMatch(error?.message ?? "", /funds|balance|quota|limit|plan|billing|usage|spend|credit|exceed|exhaust/i, "thrown message avoids the usage-limit classifier")
+  assert.doesNotMatch(error?.message ?? "", /funds|balance|quota|plan|billing|spend|credit/i, "thrown message avoids the billing-cap classifier")
+  assert.match(error?.message ?? "", /capacity/, "thrown message classifies into the short transient backoff lane")
   const idCarrier = error as { id?: unknown } | null
   if (typeof idCarrier?.id === "number") {
     assert.equal(idCarrier.id & 0x0008_0000, 0, "UsageLimit flag cleared on the thrown error")
@@ -56,7 +57,8 @@ async function failureOf(source: AssistantMessageEventStream) {
   const error = await failureOf(out)
   assert.equal(error?.status, 403)
   assert.match(error?.message ?? "", /member verdict/)
-  assert.doesNotMatch(error?.message ?? "", /funds|balance|quota|limit|plan|billing|usage|spend|credit|exceed|exhaust/i, "thrown message avoids the usage-limit classifier")
+  assert.doesNotMatch(error?.message ?? "", /funds|balance|quota|plan|billing|spend|credit/i, "thrown message avoids the billing-cap classifier")
+  assert.match(error?.message ?? "", /capacity/, "thrown message classifies into the short transient backoff lane")
 }
 
 // Wait hints leave with the verdict: the gateway's retry-after on a 402

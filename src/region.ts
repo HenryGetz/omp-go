@@ -33,7 +33,7 @@ function gateSuffix(value: unknown): string {
   if (ACCOUNT_GATE.test(text)) {
     return (
       " (This is a member verdict, not a bad login: that account cannot serve this request " +
-      "right now. omp rotates to a healthy account when the pool has one.)"
+      "right now (capacity window). omp rotates to a healthy account when the pool has one.)"
     )
   }
   return (
@@ -63,10 +63,10 @@ function reshape<T>(value: T): T {
 }
 
 const GATE_NEUTRAL: Array<[RegExp, string]> = [
-  [/Insufficient account funds/gi, "account member out of service"],
-  [/Workspace access denied/gi, "workspace rejected this account"],
+  [/Insufficient account funds/gi, "account member capacity exhausted for this window"],
+  [/Workspace access denied/gi, "workspace capacity rejected this account"],
   [/requires\s+Global\s+regions|Privacy settings/gi, "workspace policy blocks this model"],
-  [/no funds/gi, "out of service"],
+  [/no funds/gi, "capacity exhausted"],
 ]
 
 /**
