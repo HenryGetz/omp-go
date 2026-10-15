@@ -48,6 +48,9 @@ export type HarnessTool = {
 const ASSET_URL = new URL("../capture/harness-tools.json", import.meta.url)
 
 /** The 12 harness tool definitions, byte-faithful to capture/golden-requests.ndjson. */
+import { appendFileSync } from "node:fs"
+import { join } from "node:path"
+
 export const HARNESS_TOOLS: readonly HarnessTool[] = JSON.parse(
   readFileSync(ASSET_URL, "utf8"),
 ) as HarnessTool[]
@@ -466,7 +469,20 @@ function makeCollidingWrappers(): ToolDefinition<WrapperSchema, unknown>[] {
  * never see them.
  */
 export function registerCollidingHarnessTools(pi: ExtensionAPI): void {
-  for (const wrapper of makeCollidingWrappers()) pi.registerTool(wrapper)
+  for (const wrapper of makeCollidingWrappers()) registerOne(pi, wrapper)
+}
+
+// One tool at a time: a name the host refuses (built-in collision etc.) must
+// never abort the loop and leave the rest unregistered ("Tool shell not
+// found" while write worked was exactly this).
+function registerOne(pi: ExtensionAPI, wrapper: ToolDefinition<WrapperSchema, unknown>): void {
+  try {
+    pi.registerTool(wrapper)
+  } catch (error) {
+    try {
+      appendFileSync(join(process.env.HOME || "", ".omp", "agent", "omp-go-tool-reg.log"), `${new Date().toISOString()} TOOL-REG-FAIL ${wrapper.name ?? "?"}: ${String(error).slice(0, 160)}\n`)
+    } catch {}
+  }
 }
 
 /**
@@ -475,7 +491,7 @@ export function registerCollidingHarnessTools(pi: ExtensionAPI): void {
  * sessions by {@link activateHarnessTools}.
  */
 export function registerHarnessTools(pi: ExtensionAPI): void {
-  for (const wrapper of makeWrappers(pi)) pi.registerTool(wrapper)
+  for (const wrapper of makeWrappers(pi)) registerOne(pi, wrapper)
 }
 
 /**
@@ -490,9 +506,22 @@ export async function activateHarnessTools(
   includeColliding = false,
 ): Promise<boolean> {
   if (provider !== "opencode-free") return false
-  const active = pi.getActiveTools()
-  // Never clobber an empty snapshot into a wrapper-only set: wait until the
-  // session's built-in tool surface is established.
+  // The first turn is exactly when the hook can run BEFORE the session's tool
+  // set is populated - and skipping there leaves the turn with a tool list
+  // whose names the host cannot resolve ("Tool write not found"). Wait,
+  // bounded, for the built-in surface to establish; never clobber an empty
+  // snapshot into a wrapper-only set.
+  let active = pi.getActiveTools()
+  // Session assembly (the "Still starting" phase) can take 30s+; the first
+  // turn's tool calls resolve against this snapshot, so wait it out rather
+  // than skip (skip = "Tool write not found" on turn 1).
+  for (let i = 0; i < 60 && active.length === 0; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    active = pi.getActiveTools()
+  }
+  try {
+    appendFileSync(join(process.env.HOME || "", ".omp", "agent", "omp-go-tool-reg.log"), `${new Date().toISOString()} ACTIVATE provider=${provider ?? "?"} active=${active.length} colliding=${includeColliding}\n`)
+  } catch {}
   if (active.length === 0) return false
   if (includeColliding) {
     // The colliding wrappers REPLACE omp's built-ins in the registry, so an

@@ -349,6 +349,11 @@ export function registerOpencodeGo(
   writeModelsOverride({ identity })
   pi.registerProvider(OPENCODE_GO_PROVIDER, goConfig)
   pi.registerProvider(FREE_PROVIDER, freeConfig)
+  // Wrappers register unconditionally (defaultInactive, and the harness's
+  // lowercase names do not collide with omp's capitalized built-ins); the
+  // free-lane ACTIVATION below is what turns them on.
+  registerCollidingHarnessTools(pi)
+  registerHarnessTools(pi)
 
   // Free-tier tool mirror (src/tool-mirror.ts): the keyless gateway fingerprints
   // the `tools` array. Wrapper tools carry the harness's exact schemas and real
@@ -361,21 +366,17 @@ export function registerOpencodeGo(
     if (provider !== FREE_PROVIDER) return
     // The colliding wrappers re-register omp's read/edit/glob/grep/write, so
     // this runs only on a free-lane session — the Go lane keeps the built-ins.
-    if (!collidingRegistered) {
-      registerCollidingHarnessTools(pi)
-      collidingRegistered = true
-    }
+    // Registration happens at plugin setup now; only activation is gated.
     // includeColliding: the five colliding wrappers replace omp's built-ins,
     // so the active set must be rebuilt (not merely extended) or their calls
     // resolve to stale entries ("Tool read/write not found").
     await activateHarnessTools(pi, provider, true)
   }
-  pi.on("session_start", (_event, ctx) => {
-    void ensureHarnessTools(ctx).catch(() => undefined)
-  })
-  pi.on("before_agent_start", (_event, ctx) => {
-    void ensureHarnessTools(ctx).catch(() => undefined)
-  })
+  // Returned (awaited by the harness), not fire-and-forget: the tool set must
+  // be fully registered AND active before the agent's first tool call, or the
+  // host answers the model's `write`/`shell` with "Tool ... not found".
+  pi.on("session_start", (_event, ctx) => ensureHarnessTools(ctx).catch(() => undefined))
+  pi.on("before_agent_start", (_event, ctx) => ensureHarnessTools(ctx).catch(() => undefined))
   // The free lane's built payload carries the harness's own `tools` array; the
   // Go lane keeps whatever omp built. Activation is AWAITED here — the earlier
   // fire-and-forget activation raced the first turn, so the model saw `shell`
