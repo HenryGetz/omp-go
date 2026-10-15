@@ -66,8 +66,10 @@ function saveOrgVerdicts(state: Record<string, AccountVerdict>): void {
 }
 
 export function markAccountVerdict(token: string | undefined, verdict: AccountVerdict, orgId?: string): void {
-  if (!token) return
-  verdicts.set(token, verdict)
+  // The org is the durable key: a gate failure whose bearer never resolved
+  // must still poison the org for routing, or every retry walks back into it.
+  if (!token && !orgId) return
+  if (token) verdicts.set(token, verdict)
   if (!orgId) return
   withStateLock(() => {
     const state = loadOrgVerdicts()
