@@ -2,6 +2,13 @@
 // credential-rotatable (403) with actionable guidance — otherwise the session
 // pins the broken account and every retry lands on it.
 
+// Isolate HOME before the verdicts sidecar loads: these tests write verdicts,
+// and they must never touch the real ~/.omp state.
+import { mkdtempSync } from "node:fs"
+import { tmpdir } from "node:os"
+import path from "node:path"
+process.env.HOME = mkdtempSync(path.join(tmpdir(), "omp-go-region-test-"))
+
 import assert from "node:assert/strict"
 import { createAssistantMessageEventStream, type AssistantMessageEventStream } from "@oh-my-pi/pi-ai"
 import { mapRegionGateErrors } from "../src/region"
