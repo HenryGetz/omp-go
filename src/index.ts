@@ -3,6 +3,7 @@
 // catalog, the inference fingerprint, usage/limits, and (through the host)
 // the `omp auth-broker` provider entry.
 
+import { appendFileSync } from "node:fs"
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types"
 import { registerOpencodeGo, sessionIdentity } from "./register"
 import { ensureModelsOverride } from "./models-config"
@@ -35,6 +36,51 @@ export default function opencodeAuthExtension(pi: ExtensionAPI): void {
   // falls back to omp's default ranking.
   const routingPinned = new Set<string>()
   pi.on("session_start", (_event, ctx) => {
+    // Test seam (env-gated, like OMP_ORG_DEBUG): switch the session model
+    // through the REGISTRY entry via pi.setModel - the exact call ompreset's
+    // `/go` makes when applying a preset. Exists so the PTY harness can
+    // reproduce the mid-session preset switch without synthetic keystrokes
+    // (the composer never submits under the harness).
+    const seam = process.env.OMP_TEST_SETMODEL
+    const seamSwitch = (() => {
+      if (!seam) return Promise.resolve()
+      const slash = seam.indexOf("/")
+      const provider = slash > 0 ? seam.slice(0, slash) : seam
+      const id = slash > 0 ? seam.slice(slash + 1) : seam
+      return (async () => {
+        const seamLog = (line: string) => {
+          const file = process.env.OMP_ORG_DEBUG
+          if (file) {
+            try {
+              appendFileSync(file, `${JSON.stringify({ seam: line })}\n`)
+            } catch {}
+          }
+        }
+        const registry = (ctx as { modelRegistry?: { find?: (p: string, i: string) => unknown } }).modelRegistry
+        let model: unknown
+        try {
+          model = registry?.find?.(provider, id)
+          seamLog(`registry.find(${provider},${id}) -> ${model ? "found" : "none"}`)
+        } catch (error) {
+          seamLog(`registry.find threw: ${String(error).slice(0, 80)}`)
+        }
+        if (!model) {
+          const resolver = (ctx as { models?: { resolve?: (ref: string) => unknown } }).models
+          try {
+            model = resolver?.resolve?.(`${provider}/${id}`)
+            seamLog(`models.resolve(${provider}/${id}) -> ${model ? "found" : "none"}`)
+          } catch (error) {
+            seamLog(`models.resolve threw: ${String(error).slice(0, 80)}`)
+          }
+        }
+        if (model) {
+          await pi.setModel(model as never)
+          seamLog("setModel called")
+        } else {
+          seamLog("NO MODEL RESOLVED - seam was a no-op")
+        }
+      })().catch((error: unknown) => undefined)
+    })()
     const sessionId = ctx.sessionManager.getSessionId()
     // Renew the managed models.yml block every session: it carries the
     // per-model reasoning defaults (max effort) and lags behind upgrades if
@@ -43,9 +89,9 @@ export default function opencodeAuthExtension(pi: ExtensionAPI): void {
     try {
       ensureModelsOverride()
     } catch {}
-    if (!sessionId || routingPinned.has(sessionId)) return
+    if (!sessionId || routingPinned.has(sessionId)) return seamSwitch
     routingPinned.add(sessionId)
-    return pinNewSession(pi, sessionId).then(
+    return seamSwitch.then(() => pinNewSession(pi, sessionId)).then(
       () => undefined,
       () => undefined,
     )

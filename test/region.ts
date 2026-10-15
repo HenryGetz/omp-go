@@ -152,3 +152,26 @@ console.log("ACCOUNT-GATE OK: denials rotate, demote the account in health, and 
   assert.ok(landed, "gate failure lands a verdict under a stable key")
   assert.equal(landed?.kind, "funds")
 }
+
+// Numeric wait fields must not survive: the host parses a provider wait out of
+// the serialized error (#parseRetryAfterMsFromError) and fail-fasts on it
+// ("Provider requested 1732329ms wait, exceeds retry.maxDelayMs") whenever no
+// credential switch follows. The gateway body carries `retryAfterMs` as a
+// NUMBER - text rewrites never touched it.
+{
+  clearAccountVerdicts()
+  const src = createAssistantMessageEventStream()
+  const out = mapRegionGateErrors(src, "tok-secret-abcdef", "org_known")
+  src.fail({
+    status: 402,
+    message: "Upstream request failed: Insufficient account funds",
+    type: "server_error",
+    retryAfterMs: 1732329,
+    data: { error: { code: "funds", retryAfterMs: 1732329, waitTimeMs: 1732329, resetAt: 1792028239109 } },
+  })
+  const error = await failureOf(out)
+  const serialized = JSON.stringify(error ?? {})
+  assert.doesNotMatch(serialized, /1732329/, "no parsed wait may survive in the thrown error")
+  assert.doesNotMatch(serialized, /retryAfterMs|waitTimeMs|resetAt/i, "wait-typed fields are removed")
+  assert.doesNotMatch(error?.message ?? "", /retry[ =:]+\d/i, "no retry-after text in the message")
+}

@@ -79,17 +79,41 @@ const GATE_NEUTRAL: Array<[RegExp, string]> = [
  * the classifier's vocabulary. Also clears the UsageLimit bit, which pi-ai set
  * at error construction from the original wording.
  */
+// Numeric wait fields, not just wording: the host's turn-recovery parses a
+// provider wait out of the SERIALIZED error (`#parseRetryAfterMsFromError`) and
+// fail-fasts on it ("Provider requested 1732329ms wait, exceeds
+// retry.maxDelayMs") whenever no credential switch follows. A numeric
+// `retryAfterMs` in the response body rides the error object untouched by
+// text rewrites, so the field names must go too.
+function isWaitField(name: string): boolean {
+  const key = name.toLowerCase().replace(/[^a-z0-9]/g, "")
+  const verb = key.startsWith("x") ? key.slice(1) : key
+  if (!/^(retry|wait|reset|backoff|cooldown|blocked|ratelimit)/.test(verb)) return false
+  // Timing/reset semantics: the verb alone is not enough (`resetSession` etc.
+  // must survive), but any ms/at/until/time/for/in/after/delay/limit suffix
+  // marks a provider wait.
+  return /(ms|at$|until|sec|time|for$|in$|after|delay|limit|reset$)/.test(verb)
+}
+
+const WAIT_TEXT = /\bretry(?:[_ -]?after| in)?[=: ]+\d+\s*(?:ms|s|sec(?:ond)?s?|m|min(?:ute)?s?)?\b/gi
+
 function neutralizeGateError(error: unknown): void {
   const scrub = (value: unknown, depth = 0): unknown => {
     if (typeof value === "string") {
       let out = value
       for (const [pattern, replacement] of GATE_NEUTRAL) out = out.replace(pattern, replacement)
-      return out
+      return out.replace(WAIT_TEXT, "")
     }
     if (value == null || typeof value !== "object" || depth > 4) return value
     if (Array.isArray(value)) return value.map((item) => scrub(item, depth + 1))
     const record = value as Record<string, unknown>
-    for (const [key, entry] of Object.entries(record)) record[key] = scrub(entry, depth + 1)
+    for (const [key, entry] of Object.entries(record)) {
+      if (isWaitField(key)) {
+        delete record[key]
+        continue
+      }
+      record[key] = scrub(entry, depth + 1)
+    }
     return record
   }
   scrub(error)
