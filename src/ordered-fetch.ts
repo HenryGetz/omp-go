@@ -31,7 +31,7 @@ import { DEFAULT_IDENTITY, projectID, sessionID, userAgent } from "./wire"
 import { connectViaProxy, markProxyFailure, nextProxy, type Proxy } from "./proxy"
 import { dropTunnelByProxy, egressProxies } from "./egress"
 import { buildRequestHead, readHttpResponse } from "./raw-http"
-import { normalizeResponsesSse, requestToolNames } from "./sse-normalize"
+import { chatRequestToolNames, normalizeChatSse, normalizeResponsesSse, requestToolNames } from "./sse-normalize"
 import { modelFrom, recordTraffic, retryAfterMsFromHeaders, type HeaderSource } from "./traffic"
 
 // [lookup name, wire name] — the harness's header casing is part of the
@@ -174,14 +174,28 @@ export async function harnessFetch(input: RequestInfo | URL, init?: RequestInit)
   }
   const request = new Request(input as RequestInfo, init)
   const url = new URL(request.url)
-  // Response-direction repair (src/sse-normalize.ts): the Responses lane can
-  // drop argument bytes for names outside `tools[]` and passes `default.`
-  // prefixes through; when args cannot exist the normalizer makes the failure
-  // loud, and qualified-but-known names get stripped. Only /responses SSE is
-  // touched — chat responses stay byte pass-through, and so do non-SSE bodies.
-  const toolNames = url.pathname.endsWith("/responses") ? requestToolNames(bodyBytes(init?.body ?? undefined)) : undefined
-  const normalize = (stream: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> =>
-    toolNames && toolNames.size > 0 ? normalizeResponsesSse(stream, toolNames) : stream
+  // Response-direction repair (src/sse-normalize.ts), both lanes:
+  //   /responses — the serving stack can drop argument bytes for names
+  //   outside `tools[]` and passes `default.` prefixes through; when args
+  //   cannot exist the normalizer makes the failure loud, and
+  //   qualified-but-known names get stripped.
+  //   /chat/completions — byte preservation is proven on this lane, so the
+  //   only repair is parity for the SILENT-EMPTY shape: a function_call
+  //   whose name was never offered/mentioned and that finished with zero
+  //   argument bytes becomes the loud marker instead of executing as `{}`.
+  //   Non-SSE bodies pass byte-untouched on both lanes.
+  const isResponsesPath = url.pathname.endsWith("/responses")
+  const isChatPath = url.pathname.endsWith("/chat/completions")
+  const rawBody = bodyBytes(init?.body ?? undefined)
+  const toolNames = isResponsesPath
+    ? requestToolNames(rawBody)
+    : isChatPath
+      ? chatRequestToolNames(rawBody)
+      : undefined
+  const normalize = (stream: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> => {
+    if (!toolNames || toolNames.size === 0) return stream
+    return isResponsesPath ? normalizeResponsesSse(stream, toolNames) : normalizeChatSse(stream, toolNames)
+  }
   const method = (init?.method ?? request.method ?? "GET").toUpperCase()
   const body = bodyBytes(init?.body ?? undefined)
   const ordered = assembleHeaders(url, init?.headers ?? request.headers, body)

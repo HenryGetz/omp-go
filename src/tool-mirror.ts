@@ -49,6 +49,7 @@ import type {
   ToolDefinition,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types"
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core"
+import { EXTRA_TOOLS_HEADING } from "./sse-normalize"
 
 /** One entry of the OpenAI chat-completions `tools` array, as the harness sends it. */
 export type HarnessTool = {
@@ -156,7 +157,7 @@ function renderExtraToolsBlock(tools: readonly ExtraToolSchema[]): string {
     parameters: tool.parameters ?? { type: "object", properties: {} },
   }))
   return [
-    "## Additional tools active in this session",
+    EXTRA_TOOLS_HEADING,
     "The tools below are active and fully callable in this session even though they are not in the `tools` array (the free gateway only accepts the harness's own tool surface there). Before calling one, read its schema here — call it by name with arguments matching that JSON Schema exactly: never rename keys, invent enum values, or reuse an argument shape from earlier history or from a similar-sounding tool.",
     // Pretty-printed on purpose: a model scanning a compact one-line JSON wall
     // skips past `properties` and improvises (observed live: todo called with

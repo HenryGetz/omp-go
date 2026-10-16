@@ -163,6 +163,50 @@ provider-level `supportsReasoningEffort: false` that keeps every *other*
 model fieldless. Per-model clamping means the level a model receives is
 always one of its own rungs.
 
+## Tool-calling guarantee
+
+Any tool that is **active in your session** is callable on **every free
+model**, on **both wire protocols**, with its full schema visible to the
+model — including tools added to the host long after this plugin shipped.
+You never have to think about whether a tool will work on a free model.
+
+How it holds, by construction (no per-tool code, no name lists):
+
+- The free gateway only accepts the harness's own 12 tool definitions in
+  `tools[]`. The rewrite derives everything else at request time from the
+  **live session registry** (`getActiveTools ∩ getAllTools`, minus the
+  offered 12), so any future tool that registers normally is covered the
+  moment it exists:
+  - **chat/completions models** see the extra tools' exact JSON Schemas in a
+    context block riding the last user message (next to the task that
+    triggers the call);
+  - **Responses models** (`provider.npm: "@ai-sdk/openai"`) get the extras
+    appended to `tools[]` after the golden 12, because that protocol drops
+    argument bytes for names outside `tools[]`.
+- **Loud-fail instead of silent-empty.** If a tool call ever arrives with a
+  name the request never offered or mentioned *and zero argument bytes* —
+  the shape that would otherwise execute as `{}` — both lanes rewrite it
+  into a non-JSON marker naming the tool, so the model (and you, in the
+  transcript) see an actionable error instead of a silent wrong execution.
+  Complete calls are never touched: intact streams pass byte-identical.
+- **What is not guaranteed:** model-side degenerate output (a model
+  emitting wrong-but-nonempty arguments) can't be prevented by any
+  transport; it is surfaced loudly by the host's schema validation and the
+  model can retry. Nothing is silently executed with empty arguments.
+
+Proof, on every live free model, one real tool-calling turn per model
+(todo + task + glob probes, both lanes, panes and verbatim tool-call args
+dumped to `/tmp/omp-tool-matrix/`):
+
+```bash
+bash test/e2e/tmux-tool-matrix.sh
+```
+
+The roster is derived at runtime through the plugin's own `fetchFreeModels`
+(the free set rotates upstream — nothing is hardcoded). A 429 window prints
+`SKIP-LIMITED`, a catalog `tool_call: false` model prints `SKIP-NOTOOL`;
+anything else that isn't `PASS` fails the run.
+
 ## What it does
 
 - **Login.** The real device flow, byte-for-byte the one `opencode auth login`

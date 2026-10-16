@@ -8,7 +8,7 @@
 // Run: bun test/sse-normalize.ts
 
 import assert from "node:assert/strict"
-import { argsLostMarker, normalizeResponsesSse, requestToolNames } from "../src/sse-normalize"
+import { argsLostMarker, chatRequestToolNames, normalizeChatSse, normalizeResponsesSse, requestToolNames } from "../src/sse-normalize"
 
 const frame = (event: string, data: unknown): string => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
 
@@ -157,4 +157,127 @@ assert.deepEqual([...nested], ["read"])
 assert.equal(requestToolNames(Buffer.from("not json")).size, 0, "unparseable bodies contribute no names")
 assert.equal(requestToolNames(undefined).size, 0)
 
-console.log("SSE-NORMALIZE OK: loss marker, name strip, byte-pass-through, chunking, name extraction verified")
+
+// --- 9. Chat-lane parity: unoffered zero-arg call becomes the loud marker ----
+
+const chatFrame = (payload: unknown): string => `data: ${JSON.stringify(payload)}\n\n`
+const chatDone = "data: [DONE]\n\n"
+const chatIntro = (index: number, name: string, args = ""): string =>
+  chatFrame({ id: "c1", object: "chat.completion.chunk", choices: [{ index: 0, delta: { tool_calls: [{ index, id: `call_${index}`, type: "function", function: { name, arguments: args } }] }, finish_reason: null }] })
+const chatArgsDelta = (index: number, args: string): string =>
+  chatFrame({ id: "c1", object: "chat.completion.chunk", choices: [{ index: 0, delta: { tool_calls: [{ index, function: { arguments: args } }] }, finish_reason: null }] })
+const chatFinish = chatFrame({ id: "c1", object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] })
+
+const chatFeed = async (chunks: (string | Uint8Array)[], known: Set<string>): Promise<string> => {
+  const encoder = new TextDecoder()
+  const dec = new TextEncoder()
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(typeof chunk === "string" ? dec.encode(chunk) : chunk)
+      controller.close()
+    },
+  })
+  const reader = normalizeChatSse(stream, known).getReader()
+  let out = ""
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (value) out += encoder.decode(value, { stream: true })
+  }
+  return out
+}
+
+// 9a. The silent-empty shape: unoffered name, zero argument bytes → marker.
+{
+  const known = new Set(["read", "glob", "todo"]) // todo is "mentioned" (context block)
+  const stream1 = chatIntro(0, "quantum_flux") + chatIntro(1, "read", '{"path":"a.ts"}') + chatFinish + chatDone
+  const out = await chatFeed([stream1], known)
+  assert.ok(!out.includes('{"index":0,"id":"call_0","type":"function","function":{"name":"quantum_flux","arguments":""}}'), "the silent-empty intro never reaches the host as-is")
+  const markerIndex = out.indexOf("tool-call lost: \\\"quantum_flux\\\"")
+  assert.ok(markerIndex !== -1, "the marker names the unoffered tool")
+  const finishIndex = out.indexOf('"finish_reason":"tool_calls"')
+  const doneIndex = out.indexOf("data: [DONE]")
+  assert.ok(markerIndex < finishIndex && markerIndex < doneIndex, "the marker lands BEFORE the finish/[DONE] frames the host finalizes on")
+  assert.ok(out.includes(chatIntro(1, "read", '{"path":"a.ts"}')), "the offered tool's frames stay byte-identical")
+  assert.ok(out.includes("data: [DONE]"), "[DONE] survives")
+}
+
+// 9b. Mentioned tools (context block) and offered tools pass byte-identical.
+{
+  const known = new Set(["read", "glob", "todo"])
+  const stream2 = chatIntro(0, "todo", '{"op":"init"') + chatArgsDelta(0, ',"items":["a"]}') + chatFinish + chatDone
+  assert.equal(await chatFeed([stream2], known), stream2, "a block-mentioned tool with real args passes byte-identical")
+  const stream3 = chatIntro(0, "read", '{"path":"x"}') + chatFinish + chatDone
+  assert.equal(await chatFeed([stream3], known), stream3, "an offered tool passes byte-identical")
+}
+
+// 9c. A model-emitted {} for an OFFERED name stays untouched (schema validation owns it).
+{
+  const known = new Set(["read"])
+  const stream4 = chatIntro(0, "read") + chatFinish + chatDone
+  assert.equal(await chatFeed([stream4], known), stream4, "empty args for an offered name are not ours to touch")
+}
+
+// 9d. An unoffered call WITH args (model read the context block) passes byte-identical.
+{
+  const known = new Set(["read"])
+  const stream5 = chatIntro(0, "vibe_spawn") + chatArgsDelta(0, '{"cli":"x"}') + chatFinish + chatDone
+  assert.equal(await chatFeed([stream5], known), stream5, "unoffered calls with real argument bytes pass untouched")
+}
+
+// 9e. Content + non-SSE bodies stay byte-identical.
+{
+  const known = new Set(["read"])
+  const contentStream = chatFrame({ id: "c1", choices: [{ index: 0, delta: { content: "hi" }, finish_reason: null }] }) + chatFrame({ id: "c1", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }) + chatDone
+  assert.equal(await chatFeed([contentStream], known), contentStream, "a plain content stream passes byte-identical")
+  const jsonBody = '{"error":{"message":"nope"}}\n\n'
+  assert.equal(await chatFeed([jsonBody], known), jsonBody, "a mislabeled JSON body is never rewritten")
+}
+
+// 9f. Chunk boundaries: 7-byte slicing never duplicates or drops a frame.
+{
+  const known = new Set(["read"])
+  const whole = chatIntro(0, "quantum_flux") + chatIntro(1, "read", '{"path":"a.ts"}') + chatFinish + chatDone
+  const chunks: string[] = []
+  for (let i = 0; i < whole.length; i += 7) chunks.push(whole.slice(i, i + 7))
+  const out = await chatFeed(chunks, known)
+  assert.equal((out.match(/"finish_reason":"tool_calls"/g) ?? []).length, 1, "no duplicated finish frames across 7-byte chunks")
+  assert.match(out, /tool-call lost: \\"quantum_flux\\"/, "the loss repair survives arbitrary chunking")
+}
+
+// 9g. Two doubtful parallel calls: both get markers, each on its last carrier.
+{
+  const known = new Set(["read"])
+  const stream6 = chatIntro(0, "flux_a") + chatIntro(1, "flux_b") + chatFinish + chatDone
+  const out = await chatFeed([stream6], known)
+  assert.match(out, /tool-call lost: \\"flux_a\\"/, "first doubtful call is marked")
+  assert.match(out, /tool-call lost: \\"flux_b\\"/, "second doubtful call is marked")
+}
+
+// --- 10. chatRequestToolNames: tools[] ∪ context-block names ------------------
+
+{
+  const block = [
+    "## Additional tools active in this session",
+    "",
+    "Preamble.",
+    "",
+    '```json\n[{"name":"todo","description":"d","parameters":{"type":"object"}},{"name":"vibe_spawn","description":"d","parameters":{"type":"object"}}]\n```',
+  ].join("\n\n")
+  const body = Buffer.from(
+    JSON.stringify({
+      messages: [
+        { role: "system", content: "sys" },
+        { role: "user", content: [{ type: "text", text: `do it\n\n${block}` }] },
+      ],
+      tools: [{ type: "function", function: { name: "read" } }],
+    }),
+  )
+  const names = chatRequestToolNames(body)
+  assert.deepEqual([...names].sort(), ["read", "todo", "vibe_spawn"], "tools[] names AND context-block names both count as offered")
+  assert.equal(chatRequestToolNames(Buffer.from("not json")).size, 0, "unparseable bodies contribute no names")
+  assert.equal(chatRequestToolNames(undefined).size, 0)
+}
+
+
+console.log("SSE-NORMALIZE OK: loss marker, name strip, byte-pass-through, chunking, name extraction + chat-lane parity verified")
