@@ -17,10 +17,12 @@
 // catalog today serves free models the snapshot lacks (`deepseek-v4.1-flash-free`,
 // `nemotron-3.5-super-vl-free`) and the ledger already holds real free-lane rows
 // for one of them — so the row set is `freeModels()` UNION every model id the
-// ledger shows on the FREE lane. See `freeLaneIds` for the lane rule.
+// ledger shows on the FREE lane, minus the dead models (`DEAD_MODELS`: the
+// gateway rejects those outright, so their stale rows must not read as
+// available). See `freeLaneIds` for the lane rule.
 
 import { readFileSync } from "node:fs"
-import { freeModels, OPENCODE_CATALOG } from "./models"
+import { DEAD_MODELS, freeModels, OPENCODE_CATALOG } from "./models"
 import { trafficFile, type TrafficEntry } from "./traffic"
 
 /** Rolling windows, in ms. A row exactly on the boundary counts as inside. */
@@ -106,7 +108,8 @@ let paidIds: Set<string> | undefined
 /**
  * The report's row set: the free roster plus every distinct free-lane model the
  * ledger has seen. Union rows that the snapshot does not know (a live-catalog
- * free model) still render normally; a Go-lane line and a paid catalog id never
+ * free model) still render normally; a Go-lane line, a paid catalog id, and a
+ * dead model (which the gateway rejects outright however it was once used) never
  * become a free row.
  */
 export function freeLaneIds(
@@ -118,6 +121,9 @@ export function freeLaneIds(
   for (const entry of entries) {
     if (!entry.model || !isFreeLanePath(entry.path)) continue
     if (paidIds.has(entry.model)) continue
+    // Dead models are never available again, so a historical row would only
+    // present them as an idle-but-usable row.
+    if (DEAD_MODELS.has(entry.model)) continue
     ids.add(entry.model)
   }
   return [...ids]

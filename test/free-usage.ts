@@ -88,7 +88,10 @@ const lines = [
   // ledger's own free-lane rows can put them in the report.
   JSON.stringify(row(600_000, "deepseek-v4.1-flash-free", { status: 200 }, 1024)),
   JSON.stringify(row(1_800_000, "deepseek-v4.1-flash-free", { status: 200 }, 2048)),
-  JSON.stringify(row(60_000, "ling-3.0-flash-fin-free", { status: 200 })), // catalog-dropped free model
+  // Dead models: the gateway rejects them outright, so their historical rows
+  // must not turn into idle-but-available rows.
+  JSON.stringify(row(60_000, "ling-3.0-flash-fin-free", { status: 200 })),
+  JSON.stringify(row(60_000, "exo-free", { status: 200 })),
   // A paid model the Go lane served through the SAME historical base path
   // (`/inference/openai/v1/…`), which is what makes the path alone ambiguous.
   JSON.stringify(row(60_000, "deepseek-v4.1-flash", { status: 200 }, 4096)),
@@ -133,10 +136,14 @@ assert.equal(gamma.cooldownUntil, undefined, "a zero-usage model renders idle ra
 const union = freeLaneIds(entries, FREE_IDS)
 assert.deepEqual(
   [...union].sort(),
-  ["alpha-free", "beta-free", "deepseek-v4.1-flash-free", "gamma-free", "ling-3.0-flash-fin-free"],
-  "the roster wins by default; free-lane ledger ids are added, paid ids are not",
+  ["alpha-free", "beta-free", "deepseek-v4.1-flash-free", "gamma-free"],
+  "the roster wins by default; free-lane ledger ids are added, paid and dead ids are not",
 )
 assert.ok(!union.includes("deepseek-v4.1-flash"), "the paid model on a non-/go/ path stays out")
+assert.ok(
+  !union.includes("ling-3.0-flash-fin-free") && !union.includes("exo-free"),
+  "a DEAD_MODELS id WITH free-lane ledger rows never joins the row set",
+)
 assert.ok(freeLaneIds(entries).includes("deepseek-v4.1-flash-free"), "the default roster (the live one) unions with the ledger")
 
 // The same ledger through the DEFAULT row set: snapshot roster ∪ free-lane ledger ids.
@@ -144,12 +151,16 @@ const unionReport = freeUsageReport({ file: ledger, now: NOW })
 const unionRows = unionReport.split("\n").filter((line) => line.startsWith("deepseek-v4.1-flash"))
 assert.equal(unionRows.length, 1, "only the free id renders a row")
 assert.match(unionRows[0]!, /^deepseek-v4\.1-flash-free +2 /, "the union row carries its real window counts (2 requests in 1h)")
-assert.match(unionReport, /^ling-3\.0-flash-fin-free /m, "a catalog-dropped free model with ledger rows still renders")
+assert.doesNotMatch(
+  unionReport,
+  /^(ling-3\.0-flash-fin-free|exo-free) /m,
+  "a dead model with free-lane ledger rows gets no row at all",
+)
 assert.match(unionReport, /alpha-free +1/, "the go-lane line is still excluded from the count")
 assert.match(
   unionReport,
-  /free-tier window totals: 1h 6 req · 5h 9 req · 24h 11 req/,
-  "totals include the union rows and exclude the paid ones",
+  /free-tier window totals: 1h 5 req · 5h 8 req · 24h 10 req/,
+  "totals include the union rows and exclude the paid and the dead ones",
 )
 
 // -------------------------------------------------------------- expired 429
