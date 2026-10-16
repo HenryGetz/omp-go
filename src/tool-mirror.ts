@@ -679,6 +679,27 @@ export async function activateHarnessTools(
 }
 
 /**
+ * Host built-ins register omptype schema INSTANCES whose JSON.stringify is
+ * `{}` — shipping that as a "schema" tells the model the tool takes no
+ * arguments, and it improvises (exactly the failure this block prevents).
+ * omptype emits real JSON Schema via toJsonSchema(); MCP/extension tools
+ * already carry plain JSON and pass through untouched.
+ */
+function jsonSchemaOf(parameters: unknown): unknown {
+  if (parameters !== null && typeof parameters === "object") {
+    const candidate = parameters as { toJsonSchema?: () => Record<string, unknown> }
+    if (typeof candidate.toJsonSchema === "function") {
+      try {
+        return candidate.toJsonSchema()
+      } catch {
+        // An unemittable schema falls through as-is; never crash the request.
+      }
+    }
+  }
+  return parameters
+}
+
+/**
  * The session's ACTIVE tools the offered surface omits, with their registry
  * schemas. The rewrite offers only the harness 12, yet the host keeps
  * executing these — a model that never sees their schemas improvises argument
@@ -705,7 +726,7 @@ export function activeExtraTools(pi: ExtensionAPI): ExtraToolSchema[] {
     if (!activeSet.has(name)) continue
     if (seen.has(name)) continue
     seen.add(name)
-    extra.push({ name, description: typeof info.description === "string" ? info.description : "", parameters: info.parameters })
+    extra.push({ name, description: typeof info.description === "string" ? info.description : "", parameters: jsonSchemaOf(info.parameters) })
   }
   return extra
 }

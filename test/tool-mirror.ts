@@ -352,6 +352,35 @@ assert.match(result.content[0] && "text" in result.content[0] ? result.content[0
   assert.equal(extra[1]?.parameters, todoSchema, "the registry schema rides verbatim")
 }
 {
+  // Host built-ins register omptype schema INSTANCES: JSON.stringify is `{}`,
+  // but toJsonSchema() emits the real schema — the model must see THAT, or it
+  // improvises arguments for the exact tools this block exists to fix.
+  const emitted = { type: "object", properties: { code: { type: "string" } }, required: ["code"] }
+  const omptypeLike = { toJsonSchema: () => emitted }
+  const session = {
+    getActiveTools: () => ["debug2"],
+    getAllTools: () => [{ name: "debug2", description: "Evaluate code", parameters: omptypeLike }],
+  } as unknown as ExtensionAPI
+  const [entry] = activeExtraTools(session)
+  assert.deepEqual(entry?.parameters, emitted, "an omptype schema instance is emitted as real JSON Schema")
+  const broken = {
+    toJsonSchema: () => {
+      throw new Error("boom")
+    },
+  }
+  const plain = { type: "object", properties: {} }
+  const mixed = {
+    getActiveTools: () => ["a", "b"],
+    getAllTools: () => [
+      { name: "a", description: "d", parameters: plain },
+      { name: "b", description: "d", parameters: broken },
+    ],
+  } as unknown as ExtensionAPI
+  const entries = activeExtraTools(mixed)
+  assert.deepEqual(entries[0]?.parameters, plain, "plain JSON schemas pass through untouched")
+  assert.equal(entries[1]?.parameters, broken, "an unemittable schema falls through as-is")
+}
+{
   const noRegistry = fakePi(["bash"])
   assert.deepEqual(activeExtraTools(noRegistry.pi), [], "a host without getAllTools contributes no schemas")
 }
