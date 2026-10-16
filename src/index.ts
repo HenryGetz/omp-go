@@ -4,11 +4,13 @@
 // the `omp auth-broker` provider entry.
 
 import { appendFileSync } from "node:fs"
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types"
+import type { ExtensionAPI, RegisteredCommand } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types"
 import { registerOpencodeGo, sessionIdentity } from "./register"
 import { ensureModelsOverride } from "./models-config"
 import { pinNewSession } from "./routing"
 import { trafficReport } from "./traffic"
+import { freeModels } from "./models"
+import { freeUsageReport } from "./free-usage"
 import {
   addEgressFlow,
   addHost,
@@ -167,6 +169,28 @@ export default function opencodeAuthExtension(pi: ExtensionAPI): void {
       }
     },
   })
+  // Free-tier usage, local accounting only (src/free-usage.ts): the free tier
+  // has no usage surface to query, so this reads the client-side ledger. Aliases
+  // share one handler — `registerCommand` has no alias field, and the three
+  // spellings are all things people type.
+  const freeUsageDescription = "OpenCode free-tier usage (local accounting) — /freeusage [model-filter]"
+  const freeUsageCompletions: NonNullable<RegisteredCommand["getArgumentCompletions"]> = (prefix) => {
+    const last = (prefix.split(/\s+/).pop() ?? "").toLowerCase()
+    return freeModels()
+      .map((model) => model.id)
+      .filter((id) => id.toLowerCase().startsWith(last))
+      .map((id) => ({ value: id, label: id }))
+  }
+  const freeUsageHandler: RegisteredCommand["handler"] = async (args, ctx) => {
+    ctx.ui.notify(freeUsageReport({ filter: args.trim() || undefined }), "info")
+  }
+  for (const name of ["freeusage", "fusage", "free-usage"]) {
+    pi.registerCommand(name, {
+      description: freeUsageDescription,
+      getArgumentCompletions: freeUsageCompletions,
+      handler: freeUsageHandler,
+    })
+  }
   // Best-effort live session attribution; omp exposes sessionManager through
   // extension event contexts when one is active.
   pi.on("message.updated" as never, ((_event: unknown, ctx: unknown) => {

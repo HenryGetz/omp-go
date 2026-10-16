@@ -31,7 +31,7 @@ import { DEFAULT_IDENTITY, projectID, sessionID, userAgent } from "./wire"
 import { connectViaProxy, markProxyFailure, nextProxy, type Proxy } from "./proxy"
 import { dropTunnelByProxy, egressProxies } from "./egress"
 import { buildRequestHead, readHttpResponse } from "./raw-http"
-import { modelFrom, recordTraffic } from "./traffic"
+import { modelFrom, recordTraffic, retryAfterMsFromHeaders, type HeaderSource } from "./traffic"
 
 // [lookup name, wire name] — the harness's header casing is part of the
 // fingerprint; node writes keys verbatim, so casing must be restored here.
@@ -172,7 +172,7 @@ export async function harnessFetch(input: RequestInfo | URL, init?: RequestInit)
   const secure = url.protocol === "https:"
   const requestFn = secure ? https.request : http.request
 
-  const respond = (req: http.ClientRequest) => {
+  const respond = (req: http.ClientRequest, record: (status: number, headers: HeaderSource) => void) => {
     req.on("error", reject)
     const signal = init?.signal
     if (signal) {
@@ -186,6 +186,7 @@ export async function harnessFetch(input: RequestInfo | URL, init?: RequestInit)
       const decompressor = decode(res.headers["content-encoding"])
       const headers = new Headers()
       const status = res.statusCode ?? 0
+      record(status, res.headers)
       // Account verdicts (402 funds, 403 workspace, 400 region policy) answer
       // with retry-after / x-ratelimit-reset hints that describe the ACCOUNT's
       // window ("this account resets in ~27m"), not this request. If they
@@ -236,14 +237,24 @@ export async function harnessFetch(input: RequestInfo | URL, init?: RequestInit)
     const { proxy, socket } = await openTunnel()
     // Always-on local accounting (the free tier publishes no server-side
     // usage) — one compact line per request, including which hop carried it.
-    recordTraffic({
-      ts: new Date().toISOString(),
-      method,
-      path: url.pathname,
-      hop: proxy?.raw ?? "direct",
-      bytes: body?.byteLength ?? 0,
-      model: modelFrom(typeof init?.body === "string" ? init.body : undefined),
-    })
+    // Written at the RESPONSE boundary because that is the only place the
+    // status lives, and the status is what makes a tripped per-model free
+    // window visible at all (`429` + `retry-after`); a request that never
+    // produces a response records nothing.
+    const record = (status: number, headers: HeaderSource) =>
+      recordTraffic({
+        ts: new Date().toISOString(),
+        method,
+        path: url.pathname,
+        hop: proxy?.raw ?? "direct",
+        bytes: body?.byteLength ?? 0,
+        model: modelFrom(typeof init?.body === "string" ? init.body : undefined),
+        status,
+        // Only a 429 is a request-level window hint for THIS model: the
+        // retry-after on an account verdict (402/403) describes the account's
+        // reset and must never be read as a per-model cooldown.
+        retryAfterMs: status === 429 ? retryAfterMsFromHeaders(headers) : undefined,
+      })
     if (socket) {
       // Proxied: write the hand-built head over the tunnel socket and parse the
       // response ourselves — node's client ignores createConnection and dials
@@ -252,6 +263,7 @@ export async function harnessFetch(input: RequestInfo | URL, init?: RequestInit)
       socket.write(buildRequestHead(method, url.pathname + url.search, ordered))
       if (body) socket.write(body)
       const res = await readHttpResponse(socket)
+      record(res.status, res.headers)
       const decompressor = decode((res.headers["content-encoding"] as string) ?? undefined)
       const headers = new Headers()
       for (const [name, value] of Object.entries(res.headers)) {
@@ -273,7 +285,7 @@ export async function harnessFetch(input: RequestInfo | URL, init?: RequestInit)
       agent: secure ? agent : undefined,
       servername: secure ? url.hostname : undefined,
     }
-    respond(requestFn(options))
+    respond(requestFn(options), record)
   })().catch(reject)
 
   return promise

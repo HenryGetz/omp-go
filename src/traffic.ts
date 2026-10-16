@@ -19,6 +19,10 @@ export type TrafficEntry = {
   hop: string
   bytes: number
   model?: string
+  /** HTTP status of the response this request produced (absent on lines written before 1.3.8). */
+  status?: number
+  /** Retry delay the gateway announced on a 429, in ms (best-effort, absent when it said nothing). */
+  retryAfterMs?: number
 }
 
 function agentHome(): string {
@@ -76,6 +80,82 @@ export function readTraffic(): TrafficEntry[] {
       .map((line) => JSON.parse(line) as TrafficEntry)
   } catch {
     return []
+  }
+}
+
+export type HeaderSource = Headers | Record<string, string | string[] | undefined>
+
+function headerValue(headers: HeaderSource, name: string): string | undefined {
+  if (headers instanceof Headers) return headers.get(name) ?? undefined
+  const target = name.toLowerCase()
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() !== target) continue
+    const single = Array.isArray(value) ? value[0] : value
+    if (typeof single === "string") return single
+  }
+  return undefined
+}
+
+/** A plain millisecond delta (`retry-after-ms`). */
+function deltaMs(raw: string | undefined): number | undefined {
+  if (!raw) return undefined
+  const value = Number(raw.trim())
+  if (!Number.isFinite(value) || value <= 0) return undefined
+  return Math.ceil(value)
+}
+
+/** `retry-after`: seconds or an HTTP-date. */
+function secondsMs(raw: string | undefined): number | undefined {
+  if (!raw) return undefined
+  const text = raw.trim()
+  if (!text) return undefined
+  const value = Number(text)
+  if (Number.isFinite(value)) return value > 0 ? Math.ceil(value * 1000) : undefined
+  const date = Date.parse(text)
+  if (Number.isNaN(date)) return undefined
+  const delay = date - Date.now()
+  return delay > 0 ? Math.ceil(delay) : undefined
+}
+
+/** `x-ratelimit-reset[-ms]`: an absolute epoch stamp when it is one, else a delta. */
+function resetMs(raw: string | undefined, unit: "ms" | "s"): number | undefined {
+  if (!raw) return undefined
+  const value = Number(raw.trim())
+  if (!Number.isFinite(value) || value <= 0) return undefined
+  const now = Date.now()
+  // Epoch stamps arrive in seconds (1e9..1e12) or milliseconds (>1e12);
+  // anything smaller is a bare delta in the header's own unit.
+  if (value > 1e12 || value > 1e9) {
+    const target = value > 1e12 ? value : value * 1000
+    const delay = target - now
+    return delay > 0 ? Math.ceil(delay) : undefined
+  }
+  return Math.ceil(unit === "ms" ? value : value * 1000)
+}
+
+/**
+ * Best-effort retry delay (ms) out of a response's headers, mirroring the
+ * precedence of the host's own hint parser (`retry-after-ms`, `retry-after`,
+ * `x-ratelimit-reset-ms`, `x-ratelimit-reset`; the largest candidate wins).
+ *
+ * This is the ONLY place a free-tier limit is visible to us: the keyless free
+ * tier answers a tripped per-model window with a plain 429 whose body is a
+ * generic `FreeUsageLimitError` — the wait it wants is the header (the host's
+ * error text `retry-after-ms=…` is that header, re-rendered). Never throws:
+ * an unparseable or absent hint is simply `undefined`.
+ */
+export function retryAfterMsFromHeaders(headers: HeaderSource | undefined): number | undefined {
+  if (!headers) return undefined
+  try {
+    const candidates = [
+      deltaMs(headerValue(headers, "retry-after-ms")),
+      secondsMs(headerValue(headers, "retry-after")),
+      resetMs(headerValue(headers, "x-ratelimit-reset-ms"), "ms"),
+      resetMs(headerValue(headers, "x-ratelimit-reset"), "s"),
+    ].filter((value): value is number => value !== undefined)
+    return candidates.length > 0 ? Math.max(...candidates) : undefined
+  } catch {
+    return undefined
   }
 }
 

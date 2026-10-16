@@ -12,6 +12,9 @@ free tier meters per endpoint — potentially every public IP you own.
 - **/egress** — route the free traffic through your own machines over SSH
   tunnels the plugin opens and babysits for you. Per-endpoint metering means
   every box you own is its own free budget; collect the whole set.
+- **/freeusage** — what this machine has spent on the free tier, per model,
+  over rolling 1h/5h/24h windows, plus the cooldown a tripped window announced.
+  Local accounting only: the tier publishes nothing to query.
 
 Traffic is shaped exactly like the opencode harness on every request path.
 Apparently we live in a world where that matters.
@@ -91,6 +94,27 @@ Every request is recorded with the hop that carried it
 That is also how the tests prove traffic went through your tunnels and not
 around them. For the Go subscription, `omp usage` still shows the real 5h /
 weekly / monthly windows.
+
+`/freeusage` (`/fusage`, `/free-usage`) slices the same ledger per free model:
+
+```
+/freeusage
+  opencode free tier — LOCAL accounting: the free tier is keyless and publishes no
+  server-side usage (no quota headers, no usage endpoint). Ledger: ~/.omp/agent/omp-go-traffic.ndjson
+  free-tier window totals: 1h 26 req · 5h 26 req · 24h 183 req
+  model                                       1h            5h           24h     last  st  state
+  deepseek-v4.1-flash-free          26   15.9 MB  26   15.9 MB  26   15.9 MB 03:17:43 200  ready
+  mimo-v2.6-flash-free               0       0 B   0       0 B  38    1.0 MB 17:16:30 429  ready
+  step-5-preview-free                0       0 B   0       0 B 114  156.2 MB 17:13:10 429  limited (until 20:00, ~6h47m left)
+  big-pickle                         0       0 B   0       0 B   0       0 B 10-14 18:32   -  idle
+```
+
+The rows are the free roster **plus** every model the ledger has seen on the
+free lane, so a free model the embedded catalog snapshot doesn't know yet still
+shows up. The windows are per MODEL, not per account — tripping one model leaves
+its siblings serving — and the moment one trips, the `429`'s own `retry-after`
+is recorded and the report says how long is left. `/freeusage mimo` narrows the
+rows to a substring of the model id.
 
 ## Account routing (multi-account, cache-first)
 
@@ -203,6 +227,9 @@ shouts "wake" when a hidden model recovers upstream.
   translates into omp's.
 - `bun test/proxy.ts` pins the egress pool: proxy parsing, round-robin
   failover, and the SOCKS5 tunnel handshake.
+- `bun test/free-usage.ts` pins the `/freeusage` accounting: window boundaries,
+  the cooldown a 429 announces, the free-lane predicate that keeps Go-lane and
+  paid rows out, tolerant ledger reads, and the model filter.
 - `bun test/gateway-sweep.ts` chats with every free model on the real gateway,
   on its correct protocol — the anti-"model does not support this protocol"
   sweep.
