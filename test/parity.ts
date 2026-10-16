@@ -12,8 +12,8 @@
 // Run: bun test/parity.ts
 
 import { spawn, type ChildProcess } from "node:child_process"
-import { readFileSync, rmSync } from "node:fs"
-import { homedir } from "node:os"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { homedir, tmpdir } from "node:os"
 import { fileURLToPath } from "node:url"
 import path from "node:path"
 import type { ExtensionAPI, ProviderConfig } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types"
@@ -165,6 +165,14 @@ function diff(expected: unknown, actual: unknown, trail: string, problems: strin
 // --- scenario ----------------------------------------------------------------
 
 async function main(): Promise<number> {
+  // Every HOME-derived path the wrapper touches (console-config cache,
+  // models.yml, verdicts, …) must resolve INSIDE this test: wiping the prod
+  // ~/.omp under a live session already cost one debugging incident (the real
+  // per-org Console snapshots vanished mid-run).
+  const home = mkdtempSync(path.join(tmpdir(), "omp-go-parity-home-"))
+  const previousHome = process.env.HOME
+  process.env.HOME = home
+  mkdirSync(path.join(home, ".omp", "agent"), { recursive: true })
   // The Console-config cache persists per profile with a 60s TTL; clear it so
   // the login-time config fetch is always exercised (the golden trace has it).
   try {
@@ -388,6 +396,7 @@ async function main(): Promise<number> {
     try {
       rmSync(path.join(homedir(), ".omp", "agent", "omp-go-console-config.json"), { force: true })
     } catch {}
+    process.env.HOME = previousHome
   }
 }
 
