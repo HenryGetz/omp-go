@@ -19,7 +19,7 @@ export type TrafficEntry = {
   hop: string
   bytes: number
   model?: string
-  /** HTTP status of the response this request produced (absent on lines written before 1.3.8). */
+  /** HTTP status of the response this request produced (absent on lines the transport wrote before it captured one). */
   status?: number
   /** Retry delay the gateway announced on a 429, in ms (best-effort, absent when it said nothing). */
   retryAfterMs?: number

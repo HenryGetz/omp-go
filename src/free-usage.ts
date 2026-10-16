@@ -226,7 +226,7 @@ const pad = (value: number) => String(value).padStart(2, "0")
 
 /**
  * Timestamp column: the time of day inside the 24h window, and `MM-DD HH:MM`
- * outside it — an `idle` model whose last request predates the window should not
+ * outside it (the wider stamp keeps one separating space) — an `idle` model whose last request predates the window should not
  * read as if it had just served something.
  */
 function stamp(iso: string | undefined, now: number): string {
@@ -239,7 +239,7 @@ function stamp(iso: string | undefined, now: number): string {
 }
 
 const CELL = 14
-const STAMP = 11
+const STAMP = 12
 const cell = (requests: number, bytes: number): string => `${String(requests).padStart(4)} ${size(bytes).padStart(9)}`
 
 /** State column: an announced, unexpired cooldown beats `ready`; no traffic at all is `idle`. */
