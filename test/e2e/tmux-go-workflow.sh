@@ -222,5 +222,25 @@ done
 assert_turn_debug "turn 2 (post-/go \"u there?\")" "$t2_before" "$t2_org_before"
 echo "== [5/5] OK: assistant reply observed, no error markers, org attribution present =="
 
-echo "TMUX GO WORKFLOW OK"
+# --------------------------------------- 6. SECOND post-/go prompt (messages
+# must keep flowing after the preset switch, not just the first one).
+echo "== [6/6] send-keys: second post-/go message =="
+tmux send-keys -l -t "$SESSION" "one more: reply with just READY-3"
+tmux send-keys -t "$SESSION" Enter
+reply3=0
+deadline=$((SECONDS + 180))
+while [ "$SECONDS" -lt "$deadline" ]; do
+  pane="$(capture)"
+  ALLPANE+="$pane"$'\n'
+  grep -Eq "$ERROR_RE" <<<"$ALLPANE" && die "error markers after second post-/go turn: $(grep -Eo "$ERROR_RE" <<<"$ALLPANE" | sort -u | tr '\n' ' ')"
+  if is_reply "$pane" "one more: reply with just READY-3" "$BASE"; then
+    reply3=1
+    break
+  fi
+  sleep 5
+done
+[ "$reply3" -eq 1 ] || die "no assistant reply to the SECOND post-/go message"
+echo "== [6/6] OK: second post-/go message answered =="
+
+echo "TMUX GO WORKFLOW OK: /go applied and TWO messages answered after it"
 exit 0
