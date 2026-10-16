@@ -128,11 +128,16 @@ const injectedMessages = injected.messages as { role: string; content: string }[
 assert.equal(injectedMessages.length, withSystem.messages.length, "injection appends, never inserts messages")
 assert.equal(injectedMessages[0]?.role, "system")
 assert.ok(injectedMessages[0]?.content.startsWith("omp system prompt"), "the original system prompt is preserved")
-assert.match(injectedMessages[0]?.content ?? "", /"name":"todo"/, "the non-offered tool's name rides the block")
-assert.match(injectedMessages[0]?.content ?? "", /"enum":\["init","start","done"\]/, "the JSON Schema rides verbatim")
-assert.ok(injectedMessages[0]?.content?.includes("Track work items"), "descriptions collapse to a single line")
-assert.ok(!(injectedMessages[0]?.content ?? "").includes("Track\n"), "no raw newline survives in the description")
-assert.match(injectedMessages[0]?.content ?? "", /never rename keys/, "the preamble names the failure this prevents")
+const systemBlock = injectedMessages[0]?.content ?? ""
+const fence = /```json\n([\s\S]*?)\n```/.exec(systemBlock)
+assert.ok(fence, "the block carries a fenced JSON list")
+const blockEntries = JSON.parse(fence?.[1] ?? "[]") as { name: string; description: string; parameters: unknown }[]
+const blockTodo = blockEntries.find((entry) => entry.name === "todo")
+assert.ok(blockTodo, "the non-offered tool's name rides the block")
+assert.deepEqual(blockTodo?.parameters, todoSchema, "the JSON Schema rides verbatim")
+assert.ok(blockTodo?.description.includes("Track work items"), "descriptions collapse to a single line")
+assert.ok(!(blockTodo?.description ?? "").includes("\n"), "no raw newline survives in the description")
+assert.match(systemBlock, /never rename keys/, "the preamble names the failure this prevents")
 
 // The block rides the LAST leading system entry (closest to the conversation).
 const twoSystem = { ...withSystem, messages: [{ role: "system", content: "first" }, { role: "system", content: "second" }, ...ompLikePayload.messages] }
@@ -162,14 +167,14 @@ assert.deepEqual(injectedResponses.tools, [...HARNESS_TOOLS_RESPONSES], "the fla
 assert.deepEqual(Object.keys(injectedResponses), Object.keys(responsesPayload), "responses injection adds no top-level field")
 const instructions = injectedResponses.instructions
 assert.ok(typeof instructions === "string" && instructions.startsWith("omp system prompt"), "instructions keep their prefix")
-assert.ok(typeof instructions === "string" && instructions.includes('"name":"vibe_spawn"'), "the block rides the instructions field")
+assert.ok(typeof instructions === "string" && instructions.includes("vibe_spawn"), "the block rides the instructions field")
 
 const { instructions: _drop, ...responsesNoInstructions } = responsesPayload
 const injectedInput = rewriteFreeLanePayload(responsesNoInstructions, { activated: true, extraTools }) as Record<string, unknown>
 const firstItem = (injectedInput.input as Record<string, unknown>[])[0]
 assert.equal(firstItem?.role, "system", "a payload without instructions gains a leading system item")
 const leadingText = (firstItem?.content as { text?: string }[] | undefined)?.[0]?.text
-assert.ok(typeof leadingText === "string" && leadingText.includes('"name":"todo"'), "the leading system item carries the block")
+assert.ok(typeof leadingText === "string" && leadingText.includes("vibe_spawn"), "the leading system item carries the block")
 
 // --- 3. Argument shim --------------------------------------------------------
 

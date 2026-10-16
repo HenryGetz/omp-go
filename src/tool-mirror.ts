@@ -148,8 +148,13 @@ function renderExtraToolsBlock(tools: readonly ExtraToolSchema[]): string {
   }))
   return [
     "## Additional tools active in this session",
-    "The tools below are active and fully callable in this session even though they are not in the `tools` array (the free gateway only accepts the harness's own tool surface there). Call them by name with arguments matching the given JSON Schema exactly: never rename keys, invent enum values, or reuse an argument shape from earlier history.",
-    `\`\`\`json\n${JSON.stringify(entries)}\n\`\`\``,
+    "The tools below are active and fully callable in this session even though they are not in the `tools` array (the free gateway only accepts the harness's own tool surface there). Before calling one, read its schema here — call it by name with arguments matching that JSON Schema exactly: never rename keys, invent enum values, or reuse an argument shape from earlier history or from a similar-sounding tool.",
+    // Pretty-printed on purpose: a model scanning a compact one-line JSON wall
+    // skips past `properties` and improvises (observed live: todo called with
+    // guessed keys while its schema sat unread in the block). Indented schema
+    // blocks are what tool definitions look like everywhere the model has been
+    // trained to read them.
+    `\`\`\`json\n${JSON.stringify(entries, null, 2)}\n\`\`\``,
   ].join("\n\n")
 }
 
