@@ -24,7 +24,9 @@
 # every tmux session this script creates is killed; non-zero exit on FAIL or
 # STOP-403.
 #
-# Run: bash test/e2e/tmux-tool-matrix.sh
+# Run: bash test/e2e/tmux-tool-matrix.sh [model-id ...]
+# With model arguments, only those models run (targeted re-runs); the roster
+# is still derived live and any named model absent from it is skipped.
 
 set -u -o pipefail
 
@@ -49,8 +51,15 @@ trap cleanup EXIT INT TERM
 cat > "$WORK/analyze-session.py" <<'PY'
 import json, sys
 
+# Pair every toolCall with its toolResult (by toolCallId). A call is BAD when
+#   - its arguments carry __parseError (unparseable / lost-args marker),
+#   - its RESULT failed schema validation ("(was missing)" / "Invalid" /
+#     "Validation failed"), or
+#   - it arrived with EMPTY arguments AND its result errored (empty {} against
+#     an all-optional tool like `wait` that SUCCEEDS is schema-complete).
 calls, bad, bad_results = [], False, []
 VALIDATION_MARKERS = ("(was missing)", "__parseError", "Invalid", "Validation failed")
+results = {}
 
 for line in open(sys.argv[1]):
     line = line.strip()
@@ -60,25 +69,45 @@ for line in open(sys.argv[1]):
         obj = json.loads(line)
     except Exception:
         continue
-    if "__parseError" in line:
-        bad = True
     msg = obj.get("message") or {}
     role = msg.get("role")
-    for part in (msg.get("content") or []):
-        if not isinstance(part, dict):
-            continue
-        if part.get("type") == "toolCall":
-            args, name = part.get("arguments"), part.get("name", "?")
-            if not isinstance(args, dict) or not args:
-                bad = True
-                calls.append((name, "{}", "EMPTY"))
-            else:
-                calls.append((name, json.dumps(args, sort_keys=True), "ok"))
     if role == "toolResult":
         blob = json.dumps(msg.get("content") or [])
+        results[msg.get("toolCallId")] = (bool(msg.get("isError")), blob)
+
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        obj = json.loads(line)
+    except Exception:
+        continue
+    msg = obj.get("message") or {}
+    if msg.get("role") != "assistant":
+        continue
+    for part in (msg.get("content") or []):
+        if not isinstance(part, dict) or part.get("type") != "toolCall":
+            continue
+        name, args, cid = part.get("name", "?"), part.get("arguments"), part.get("id")
+        is_err, blob = results.get(cid, (False, ""))
+        if "__parseError" in json.dumps(args):
+            bad = True
+            calls.append((name, json.dumps(args, sort_keys=True), "PARSE-ERR"))
+            continue
         if any(m in blob for m in VALIDATION_MARKERS):
             bad = True
             bad_results.append(blob[:160])
+            calls.append((name, json.dumps(args, sort_keys=True) if args else "{}", "INVALID"))
+            continue
+        if not isinstance(args, dict) or not args:
+            if is_err:
+                bad = True
+                calls.append((name, "{}", "EMPTY-ERR"))
+            else:
+                calls.append((name, "{}", "empty-ok"))
+            continue
+        calls.append((name, json.dumps(args, sort_keys=True), "ok"))
 
 names = sorted({c[0] for c in calls})
 print(json.dumps({
@@ -105,6 +134,14 @@ for (const model of models) console.log(`${model.id}\t${usesResponsesAPI(model.i
 ' 2>/dev/null)"
 [ -n "$ROSTER" ] || { echo "FAIL: roster derivation returned nothing" >&2; exit 1; }
 echo "$ROSTER" | awk -F'\t' '{printf "  %-36s %-9s tool_call=%s\n", $1, $2, $3}'
+
+# Optional filter: run only the named models (still live-roster-validated).
+if [ "$#" -gt 0 ]; then
+  FILTER=" $* "
+  ROSTER="$(echo "$ROSTER" | while IFS=$'\t' read -r id lane tc; do case "$FILTER" in *" $id "*) printf '%s\t%s\t%s\n' "$id" "$lane" "$tc";; esac; done)"
+  [ -n "$ROSTER" ] || { echo "FAIL: none of the named models are in the live roster" >&2; exit 1; }
+  echo "== filtered to: $(echo "$ROSTER" | cut -f1 | tr '\n' ' ') =="
+fi
 
 # Least-used first (healthiest windows burn first, riskiest last), derived from
 # this machine's own ledger; unknown models sort as 0.
@@ -143,7 +180,7 @@ run_model() {
 
   local ok=0 stopped=0
   local pane_now=""
-  for _ in $(seq 1 84); do
+  for _ in $(seq 1 180); do
     sleep 5
     pane_now="$(tmux capture-pane -t "$S" -p 2>/dev/null)"
     printf '%s' "$pane_now" > "$pane"
@@ -176,10 +213,20 @@ run_model() {
     return 0
   fi
 
-  # Session JSONL: newest session file at depth 2 (cwd-slug/session.jsonl —
-  # subagent files sit deeper and are ignored), created by this turn.
-  local jsonl
-  jsonl=$(find "$HOME/.omp/agent/sessions" -mindepth 2 -maxdepth 2 -name '*.jsonl' -newermt "$start_ts" 2>/dev/null | sort | tail -1)
+  # Session JSONL: the OLDEST session file newer than start_ts in this turn's
+  # cwd-slug dir. The parent (probe) session is created first; a `task`
+  # subagent inherits the cwd and writes a NEWER sibling file that must not
+  # be analyzed (its results quote arbitrary repo text).
+  local slug jsonl
+  slug=$(printf '%s' "$DIR" | sed 's|/|-|g')
+  jsonl=$(find "$HOME/.omp/agent/sessions/$slug" -maxdepth 1 -name '*.jsonl' -newermt "$start_ts" 2>/dev/null | sort | head -1)
+  # Belt and braces: the parent's FIRST user message carries the marker.
+  if [ -n "$jsonl" ] && ! head -c 4096 "$jsonl" | grep -q "$MARKER"; then
+    local candidate
+    for candidate in $(find "$HOME/.omp/agent/sessions/$slug" -maxdepth 1 -name '*.jsonl' -newermt "$start_ts" 2>/dev/null | sort); do
+      if head -c 4096 "$candidate" | grep -q "Run these three tool calls"; then jsonl="$candidate"; break; fi
+    done
+  fi
 
   local verdict evidence
   if [ -z "$jsonl" ]; then
@@ -203,7 +250,7 @@ for blob in data["bad_results"]:
     if [ "$bad" = "True" ] || [ "$count" = "0" ]; then
       verdict=FAIL
       evidence="schema-incomplete=$bad calls=$count probes=[$names]; traffic: ${statuses:-none}"
-    elif ! printf '%s' "$statuses" | grep -q ' 200'; then
+    elif ! printf '%s' "$statuses" | grep -qE '"status":200'; then
       verdict=FAIL
       evidence="no status 200; calls=$count probes=[$names]; traffic: ${statuses:-none}"
     elif [[ ",$names," != *",todo,"* ]] || [[ ",$names," != *",task,"* ]]; then
