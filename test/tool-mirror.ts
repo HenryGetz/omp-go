@@ -168,8 +168,10 @@ const noSystemMessages = noSystem.messages as { role: string; content: string }[
 assert.equal(noSystemMessages.length, ompLikePayload.messages.length, "no message is inserted")
 assert.ok(noSystemMessages[0]?.content.startsWith("hi"), "a system-less payload carries the block on its user message")
 
-// Responses payloads: the block rides `instructions` (or a leading system
-// item), the tools stay flat, and again no top-level field appears.
+// Responses payloads: the ACTIVE non-offered tools EXTEND `tools[]` (the
+// Responses serving stack drops argument bytes for names outside it — wire
+// capture 2026-10-16), the golden 12 keep their bytes and order as the
+// prefix, instructions/input stay untouched, no top-level field appears.
 const responsesPayload = {
   model: "muse-spark-1.3-contributor-free",
   instructions: "omp system prompt",
@@ -180,19 +182,36 @@ const responsesPayload = {
   tools: [{ type: "function", name: "todo", description: "omp todo", parameters: {} }],
   stream: true,
 }
-const injectedResponses = rewriteFreeLanePayload(responsesPayload, { activated: true, extraTools }) as Record<string, unknown>
-assert.deepEqual(injectedResponses.tools, [...HARNESS_TOOLS_RESPONSES], "the flat harness surface for the Responses protocol")
-assert.deepEqual(Object.keys(injectedResponses), Object.keys(responsesPayload), "responses injection adds no top-level field")
-const instructions = injectedResponses.instructions
-assert.ok(typeof instructions === "string" && instructions.startsWith("omp system prompt"), "instructions keep their prefix")
-assert.ok(typeof instructions === "string" && instructions.includes("vibe_spawn"), "the block rides the instructions field")
+const extendedResponses = rewriteFreeLanePayload(responsesPayload, { activated: true, extraTools }) as Record<string, unknown>
+const responseTools = extendedResponses.tools as Record<string, unknown>[]
+assert.deepEqual(
+  responseTools.slice(0, HARNESS_TOOLS_RESPONSES.length),
+  [...HARNESS_TOOLS_RESPONSES],
+  "the golden 12 keep their bytes and order as the tools[] prefix",
+)
+assert.deepEqual(Object.keys(extendedResponses), Object.keys(responsesPayload), "responses rewrite adds no top-level field")
+assert.equal(extendedResponses.instructions, "omp system prompt", "instructions stay untouched — tools[] carries the schemas now")
+assert.equal(extendedResponses.input, responsesPayload.input, "input stays untouched")
+const extraWire = responseTools.slice(HARNESS_TOOLS_RESPONSES.length)
+assert.deepEqual(
+  extraWire.map((tool) => tool.name),
+  ["todo", "vibe_spawn"],
+  "the active non-offered tools follow the golden 12",
+)
+const todoWire = extraWire[0] as { type: string; name: string; description: string; parameters: unknown; function?: unknown }
+assert.equal(todoWire.type, "function", "extras use the flat Responses shape")
+assert.equal(todoWire.function, undefined, "extras stay flat (no chat-style nesting)")
+assert.equal(todoWire.name, "todo")
+assert.deepEqual(todoWire.parameters, todoSchema, "extras carry the real JSON Schema")
+assert.ok(todoWire.description.includes("Track work items"), "extras carry the registry description, collapsed to one line")
+assert.ok(!todoWire.description.includes("\n"), "no raw newline in a tools[] description")
 
-const { instructions: _drop, ...responsesNoInstructions } = responsesPayload
-const injectedInput = rewriteFreeLanePayload(responsesNoInstructions, { activated: true, extraTools }) as Record<string, unknown>
-const firstItem = (injectedInput.input as Record<string, unknown>[])[0]
-assert.equal(firstItem?.role, "system", "a payload without instructions gains a leading system item")
-const leadingText = (firstItem?.content as { text?: string }[] | undefined)?.[0]?.text
-assert.ok(typeof leadingText === "string" && leadingText.includes("vibe_spawn"), "the leading system item carries the block")
+// A Responses payload with no active extras keeps the golden 12 verbatim.
+assert.deepEqual(
+  rewriteFreeLanePayload(responsesPayload, { activated: true }),
+  { ...responsesPayload, tools: [...HARNESS_TOOLS_RESPONSES] },
+  "without extras the Responses rewrite is exactly the golden 12",
+)
 
 // --- 3. Argument shim --------------------------------------------------------
 

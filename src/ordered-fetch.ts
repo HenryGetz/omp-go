@@ -31,6 +31,7 @@ import { DEFAULT_IDENTITY, projectID, sessionID, userAgent } from "./wire"
 import { connectViaProxy, markProxyFailure, nextProxy, type Proxy } from "./proxy"
 import { dropTunnelByProxy, egressProxies } from "./egress"
 import { buildRequestHead, readHttpResponse } from "./raw-http"
+import { normalizeResponsesSse, requestToolNames } from "./sse-normalize"
 import { modelFrom, recordTraffic, retryAfterMsFromHeaders, type HeaderSource } from "./traffic"
 
 // [lookup name, wire name] — the harness's header casing is part of the
@@ -173,6 +174,14 @@ export async function harnessFetch(input: RequestInfo | URL, init?: RequestInit)
   }
   const request = new Request(input as RequestInfo, init)
   const url = new URL(request.url)
+  // Response-direction repair (src/sse-normalize.ts): the Responses lane can
+  // drop argument bytes for names outside `tools[]` and passes `default.`
+  // prefixes through; when args cannot exist the normalizer makes the failure
+  // loud, and qualified-but-known names get stripped. Only /responses SSE is
+  // touched — chat responses stay byte pass-through, and so do non-SSE bodies.
+  const toolNames = url.pathname.endsWith("/responses") ? requestToolNames(bodyBytes(init?.body ?? undefined)) : undefined
+  const normalize = (stream: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> =>
+    toolNames && toolNames.size > 0 ? normalizeResponsesSse(stream, toolNames) : stream
   const method = (init?.method ?? request.method ?? "GET").toUpperCase()
   const body = bodyBytes(init?.body ?? undefined)
   const ordered = assembleHeaders(url, init?.headers ?? request.headers, body)
@@ -211,7 +220,7 @@ export async function harnessFetch(input: RequestInfo | URL, init?: RequestInit)
         if (Array.isArray(value)) for (const v of value) headers.append(name, v)
         else headers.set(name, value)
       }
-      resolve(new Response(webStream(res, decompressor), { status: res.statusCode ?? 0, statusText: res.statusMessage, headers }))
+      resolve(new Response(normalize(webStream(res, decompressor)), { status: res.statusCode ?? 0, statusText: res.statusMessage, headers }))
     })
     if (body) req.write(body)
     req.end()
@@ -281,7 +290,7 @@ export async function harnessFetch(input: RequestInfo | URL, init?: RequestInit)
         else headers.set(name, value)
       }
       const source = decompressor ? Readable.fromWeb(res.body as never).pipe(decompressor) : Readable.fromWeb(res.body as never)
-      resolve(new Response(Readable.toWeb(source) as ReadableStream<Uint8Array>, { status: res.status, statusText: res.statusText, headers }))
+      resolve(new Response(normalize(Readable.toWeb(source) as ReadableStream<Uint8Array>), { status: res.status, statusText: res.statusText, headers }))
       return
     }
     const options: https.RequestOptions = {

@@ -158,6 +158,17 @@ function renderExtraToolsBlock(tools: readonly ExtraToolSchema[]): string {
   ].join("\n\n")
 }
 
+/** The active non-offered tools as Responses `tools[]` entries (flat shape,
+ *  same serialization family the golden 12 use on this protocol). */
+function extraResponsesTools(tools: readonly ExtraToolSchema[]): Record<string, unknown>[] {
+  return tools.map((tool) => ({
+    type: "function",
+    name: tool.name,
+    description: oneLine(tool.description),
+    parameters: tool.parameters ?? { type: "object", properties: {} },
+  }))
+}
+
 /** Append `block` to a message's text content — string or typed text parts. */
 function appendTextContent(content: unknown, block: string, textType: string): unknown {
   if (typeof content === "string") return `${content}\n\n${block}`
@@ -178,29 +189,25 @@ function appendTextContent(content: unknown, block: string, textType: string): u
 }
 
 /**
- * Append `block` to the payload's request context without adding a top-level
- * body field or disturbing the fingerprinted `tools` array.
- *
- * Chat payloads: the LAST user message — the sentence that triggers the tool
- * call is right above it, and the live gate showed a system-level block being
- * scanned past (todo improvised with its full schema sitting unread in the
- * system prompt). Payloads without a user message fall back to the LAST
- * leading system/developer message. Responses payloads keep the system
- * context: the `instructions` field, else a leading system item.
+ * Append `block` to a chat payload's request context without adding a top-level
+ * body field or disturbing the fingerprinted `tools` array. The LAST user
+ * message carries it — the sentence that triggers the tool call is right above
+ * it, and the live gate showed a system-level block being scanned past (todo
+ * improvised with its full schema sitting unread in the system prompt).
+ * Payloads without a user message fall back to the LAST leading
+ * system/developer message. Responses payloads never take this path: they
+ * carry the extras in `tools[]` instead (see {@link rewriteFreeLanePayload}).
  */
-function injectContextBlock(payload: Record<string, unknown>, block: string, responses: boolean): Record<string, unknown> {
-  const containerKey = responses ? "input" : "messages"
-  const container = payload[containerKey]
+function injectContextBlock(payload: Record<string, unknown>, block: string): Record<string, unknown> {
+  const container = payload.messages
   if (!Array.isArray(container)) return payload
   const items = container.slice()
-  if (!responses) {
-    for (let index = items.length - 1; index >= 0; index -= 1) {
-      const role = (items[index] as { role?: unknown } | null)?.role
-      if (role !== "user") continue
-      const message = items[index] as Record<string, unknown>
-      items[index] = { ...message, content: appendTextContent(message.content, block, "text") }
-      return { ...payload, messages: items }
-    }
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const role = (items[index] as { role?: unknown } | null)?.role
+    if (role !== "user") continue
+    const message = items[index] as Record<string, unknown>
+    items[index] = { ...message, content: appendTextContent(message.content, block, "text") }
+    return { ...payload, messages: items }
   }
   let target = -1
   for (let index = 0; index < items.length; index += 1) {
@@ -210,14 +217,8 @@ function injectContextBlock(payload: Record<string, unknown>, block: string, res
   }
   if (target >= 0) {
     const item = items[target] as Record<string, unknown>
-    items[target] = { ...item, content: appendTextContent(item.content, block, responses ? "input_text" : "text") }
-    return { ...payload, [containerKey]: items }
-  }
-  if (responses) {
-    if (typeof payload.instructions === "string")
-      return { ...payload, instructions: `${payload.instructions}\n\n${block}` }
-    items.unshift({ type: "message", role: "system", content: [{ type: "input_text", text: block }] })
-    return { ...payload, input: items }
+    items[target] = { ...item, content: appendTextContent(item.content, block, "text") }
+    return { ...payload, messages: items }
   }
   items.unshift({ role: "system", content: block })
   return { ...payload, messages: items }
@@ -245,11 +246,27 @@ export type FreeLaneRewriteState = {
  * (`messages`).
  *
  * The swap also SPLITS the tool surface: every active tool outside the 12 is
- * dropped from `tools[]` yet stays executable by the host. To keep every
- * executable tool visible, `state.extraTools` schemas are injected into the
- * request CONTEXT — appended to the system prompt (`instructions` on the
- * Responses protocol) as one compact block — without touching the
- * fingerprinted `tools` array or adding a top-level body field.
+ * dropped from `tools[]` yet stays executable by the host — and the two
+ * protocols need DIFFERENT repairs to keep those tools usable:
+ *
+ *   chat/completions — the gateway preserves argument bytes for ANY callable
+ *   name (mimo emitted first-shot-valid `todo` args with only the context
+ *   block), so the schemas ride the request CONTEXT: one compact block
+ *   appended to the LAST USER message (next to the task that triggers the
+ *   call). `tools[]` stays byte-harness-shaped.
+ *
+ *   Responses — the serving stack DROPS argument bytes for function names
+ *   outside `tools[]` (wire capture 2026-10-16: every `todo`/`task`/`bash`
+ *   call arrives with ZERO `function_call_arguments.delta` events and
+ *   `done: "{}"` while `subagent`/`execute`/`shell` stream full JSON), so a
+ *   context block can never work there. The active non-offered tools are
+ *   extended INTO `tools[]` instead — after the golden 12, flat shape, real
+ *   schemas — which is a native surface every model's tool-calling head is
+ *   trained on, and the gate's rule 3 allows unknown-named tools with any
+ *   schema.
+ *
+ * Either way: no new top-level body field, and the golden 12 keep their
+ * bytes and order.
  */
 export function rewriteFreeLanePayload(payload: unknown, state: FreeLaneRewriteState): unknown {
   if (typeof payload !== "object" || payload === null || !("tools" in payload)) return payload
@@ -262,11 +279,14 @@ export function rewriteFreeLanePayload(payload: unknown, state: FreeLaneRewriteS
   let next: Record<string, unknown> = { ...record, tools: surface.map((tool) => tool) }
   const extra = state.extraTools ?? []
   if (extra.length > 0) {
-    const block = renderExtraToolsBlock(extra)
     if (responses) {
-      if (typeof next.instructions === "string" || Array.isArray(next.input)) next = injectContextBlock(next, block, true)
+      // Responses: extend `tools[]` (see the docstring — argument bytes for
+      // unoffered names do not survive this protocol). The golden 12 keep
+      // their bytes and order; the extras follow.
+      next = { ...next, tools: [...HARNESS_TOOLS_RESPONSES, ...extraResponsesTools(extra)] }
     } else if (Array.isArray(next.messages)) {
-      next = injectContextBlock(next, block, false)
+      const block = renderExtraToolsBlock(extra)
+      next = injectContextBlock(next, block)
     }
   }
   return next

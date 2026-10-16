@@ -209,9 +209,15 @@ always one of its own rungs.
   built-in schemas. Two guards keep the swap honest: the harness names reach
   the wire only when activation confirmed them (otherwise the host's own
   payload ships — no more turn-1 `Tool write not found`), and every ACTIVE tool
-  outside the 12 (`todo`, `task`, …) keeps its JSON Schema visible as one
-  compact block in the system prompt — dropped from `tools[]` but still
-  executable, so the model must never improvise their arguments from history.
+  outside the 12 (`todo`, `task`, …) stays usable on both protocols — on
+  chat/completions their schemas ride one compact block appended to the last
+  user message (the gateway keeps argument bytes for any callable name there);
+  on the Responses lane the serving stack DROPS argument bytes for names
+  outside `tools[]` (wire-verified: zero argument deltas, `done: "{}"`), so
+  those tools extend `tools[]` itself after the golden 12, and a response SSE
+  normalizer (`src/sse-normalize.ts`) strips `default.`-qualified names and
+  turns any residual zero-argument call into a loud, non-executable transport
+  error instead of a silent `{}` retry loop.
 
 Some catalog entries drift dead upstream without warning (right now:
 `exo-free` answers `410 ModelDeprecated`, `ling-3.0-flash-fin-free` is
