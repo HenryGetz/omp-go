@@ -4,10 +4,14 @@
 // if one of them breaks, free-tier requests get `FreeTierError`.
 
 import assert from "node:assert/strict"
+import { once } from "node:events"
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs"
+import net from "node:net"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { assembleHeaders } from "../src/ordered-fetch"
+import zlib from "node:zlib"
+import { assembleHeaders, decode } from "../src/ordered-fetch"
+import { readHttpResponse } from "../src/raw-http"
 import { orgScopedHeaders } from "../src/console-config"
 import { writeModelsOverride } from "../src/models-config"
 import { WIRE_API, isOurWireProvider, withServingOrg } from "../src/register"
@@ -169,4 +173,154 @@ assert.deepEqual(
   assert.equal(unowned["user-agent"], fingerprint["user-agent"], "fingerprint headers still sent without an org")
 }
 
-console.log("TRANSPORT OK: header order/casing, session-id scheme, no static org stamps, stamped+complete managed block")
+// --- Accept-Encoding / decoder lockstep --------------------------------------
+
+// The harness's exact accept-encoding is fingerprint-checked, so EVERY token it
+// advertises must have a decoder: a response handed downstream still compressed
+// kills the SSE reader for the whole stream (zstd was advertised-but-undecoded).
+{
+  const advertised = (headers["Accept-Encoding"] ?? "").split(", ")
+  assert.deepEqual(advertised, ["gzip", "deflate", "br", "zstd"], "the harness's exact accept-encoding set")
+  for (const coding of advertised)
+    assert.ok(decode(coding), `accept-encoding advertises "${coding}" but decode() cannot decode it`)
+  const compressed = zlib.zstdCompressSync(Buffer.from("hello zstd"))
+  const decoded = await new Promise<string>((resolve, reject) => {
+    const stream = decode("zstd")
+    if (!stream) return reject(new Error("no zstd decoder"))
+    const chunks: Buffer[] = []
+    stream.on("data", (chunk: Buffer) => chunks.push(chunk))
+    stream.on("end", () => resolve(Buffer.concat(chunks).toString()))
+    stream.on("error", reject)
+    stream.end(compressed)
+  })
+  assert.equal(decoded, "hello zstd", "the zstd decoder must actually round-trip, not just exist")
+}
+
+// --- raw-http: a dropped connection must ERROR, never resolve short ----------
+
+// The proxied path parses responses over a raw socket; before this, EOF in the
+// middle of a declared frame resolved the PARTIAL buffer as success and the
+// tail misparsed. Every truncated frame now errors; clean EOF-framed bodies
+// (the connection's end is the frame) still complete.
+{
+  const serve = async (respond: (socket: net.Socket) => void) => {
+    const server = net.createServer((socket) => {
+      socket.on("error", () => undefined)
+      respond(socket)
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject)
+      server.listen(0, "127.0.0.1", resolve)
+    })
+    const address = server.address()
+    const port = typeof address === "object" && address !== null ? address.port : 0
+    return { port, server }
+  }
+  const rawGet = async (port: number) => {
+    const socket = net.connect(port, "127.0.0.1")
+    await once(socket, "connect")
+    return readHttpResponse(socket)
+  }
+  const readAllBody = async (body: ReadableStream<Uint8Array>) => {
+    const reader = body.getReader()
+    const chunks: Uint8Array[] = []
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value) chunks.push(value)
+    }
+    return Buffer.concat(chunks)
+  }
+
+  // Dropped mid-content-length body.
+  {
+    const { port, server } = await serve((socket) => {
+      socket.write("HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\n")
+      socket.write("0123456789")
+      socket.end()
+    })
+    try {
+      const response = await rawGet(port)
+      assert.equal(response.status, 200, "the head of a truncated response still parses")
+      await assert.rejects(
+        () => readAllBody(response.body),
+        /connection closed after 10 of 50 bytes/,
+        "a truncated content-length body must error, not resolve short",
+      )
+    } finally {
+      server.close()
+    }
+  }
+
+  // Dropped mid-chunk body.
+  {
+    const { port, server } = await serve((socket) => {
+      socket.write("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+      socket.write("a\r\n")
+      socket.write("partial")
+      socket.end()
+    })
+    try {
+      const response = await rawGet(port)
+      await assert.rejects(
+        () => readAllBody(response.body),
+        /connection closed after 7 of 10 bytes/,
+        "a truncated chunk body must error, not misframe the tail",
+      )
+    } finally {
+      server.close()
+    }
+  }
+
+  // Dropped mid-head.
+  {
+    const { port, server } = await serve((socket) => {
+      socket.write("HTTP/1.1 200 OK\r\nConte")
+      socket.end()
+    })
+    try {
+      await assert.rejects(
+        () => rawGet(port),
+        /connection closed before response head/,
+        "a dropped head must error",
+      )
+    } finally {
+      server.close()
+    }
+  }
+
+  // EOF-framed body (no length header): the connection's end is the frame —
+  // short reads are the normal case and the body completes.
+  {
+    const { port, server } = await serve((socket) => {
+      socket.write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+      socket.write("data: hi\n\n")
+      socket.end()
+    })
+    try {
+      const response = await rawGet(port)
+      assert.equal((await readAllBody(response.body)).toString(), "data: hi\n\n", "an EOF-framed body completes")
+    } finally {
+      server.close()
+    }
+  }
+
+  // A complete chunked stream (terminal chunk, then close) still round-trips.
+  {
+    const { port, server } = await serve((socket) => {
+      socket.write("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+      socket.write("5\r\nhello\r\n")
+      socket.write("3\r\n---\r\n")
+      socket.write("0\r\n\r\n")
+      socket.end()
+    })
+    try {
+      const response = await rawGet(port)
+      assert.equal((await readAllBody(response.body)).toString(), "hello---", "a complete chunked body round-trips")
+    } finally {
+      server.close()
+    }
+  }
+}
+
+console.log("TRANSPORT OK: header order/casing, session-id scheme, no static org stamps, decoder lockstep, raw-http EOF errors")

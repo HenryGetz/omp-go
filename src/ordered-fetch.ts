@@ -85,7 +85,14 @@ function bodyBytes(body: BodyInit | null | undefined): Buffer | undefined {
   throw new Error("ordered-fetch: streaming request bodies are not supported (pi-ai sends strings)")
 }
 
-function decode(encoding: string | null | undefined): Transform | undefined {
+/**
+ * Decoder for every encoding the Accept-Encoding header advertises (the
+ * harness's exact `gzip, deflate, br, zstd`, fingerprint-checked). The header
+ * and this switch MUST stay in lockstep: a response handed downstream still
+ * compressed kills the SSE reader for the whole stream, so zstd gets the same
+ * decoder treatment as the rest (node/bun zlib ships it).
+ */
+export function decode(encoding: string | null | undefined): Transform | undefined {
   switch (encoding) {
     case "gzip":
       return zlib.createGunzip()
@@ -93,6 +100,8 @@ function decode(encoding: string | null | undefined): Transform | undefined {
       return zlib.createInflate()
     case "br":
       return zlib.createBrotliDecompress()
+    case "zstd":
+      return zlib.createZstdDecompress()
     default:
       return undefined
   }

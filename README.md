@@ -206,7 +206,12 @@ always one of its own rungs.
   executor, `read`/`edit`/`glob`/`grep`/`write` delegate to the built-ins,
   `webfetch`/`websearch`/`subagent`/`execute` have real implementations). The
   `opencode-go` lane is untouched: its wrappers stay inactive and it keeps the
-  built-in schemas.
+  built-in schemas. Two guards keep the swap honest: the harness names reach
+  the wire only when activation confirmed them (otherwise the host's own
+  payload ships — no more turn-1 `Tool write not found`), and every ACTIVE tool
+  outside the 12 (`todo`, `task`, …) keeps its JSON Schema visible as one
+  compact block in the system prompt — dropped from `tools[]` but still
+  executable, so the model must never improvise their arguments from history.
 
 Some catalog entries drift dead upstream without warning (right now:
 `exo-free` answers `410 ModelDeprecated`, `ling-3.0-flash-fin-free` is

@@ -29,8 +29,57 @@ function pushStream(): { stream: ReadableStream<Uint8Array>; push: (chunk: Uint8
   }
 }
 
-/** Read exactly `count` bytes from the socket's paused-mode buffer. */
+/**
+ * Read exactly `count` bytes from the socket's paused-mode buffer. A
+ * connection dropped mid-frame resolves `read(n)` SHORT at EOF (all remaining
+ * data, fewer than n bytes); resolving that short made a truncated body look
+ * like a valid one and the tail misparsed — so a partial buffer at close now
+ * REJECTS. `null` means a clean EOF with nothing buffered.
+ */
 function readBytes(socket: net.Socket, count: number): Promise<Buffer | null> {
+  const { promise, resolve, reject } = Promise.withResolvers<Buffer | null>()
+  if (count <= 0) {
+    resolve(Buffer.alloc(0))
+    return promise
+  }
+  let got: Buffer = Buffer.alloc(0)
+  const cleanup = () => {
+    socket.off("readable", tryRead)
+    socket.off("error", onError)
+    socket.off("close", onClose)
+  }
+  const tryRead = () => {
+    while (got.byteLength < count) {
+      const chunk = socket.read(count - got.byteLength) as Buffer | null
+      if (!chunk) return // wait for the next readable/close event
+      got = got.byteLength > 0 ? Buffer.concat([got, chunk]) : chunk
+    }
+    cleanup()
+    resolve(got)
+  }
+  const onError = (error: Error) => {
+    cleanup()
+    reject(error)
+  }
+  const onClose = () => {
+    cleanup()
+    if (got.byteLength > 0)
+      reject(new Error(`raw-http: connection closed after ${got.byteLength} of ${count} bytes`))
+    else resolve(null)
+  }
+  socket.on("readable", tryRead)
+  socket.on("error", onError)
+  socket.on("close", onClose)
+  tryRead()
+  return promise
+}
+
+/**
+ * Read the next available chunk, whatever its length. EOF-framed bodies have
+ * no declared boundary — the connection's end IS the frame — so short reads
+ * are the normal case and `null` (clean EOF) terminates the stream.
+ */
+function readSome(socket: net.Socket, count: number): Promise<Buffer | null> {
   const { promise, resolve, reject } = Promise.withResolvers<Buffer | null>()
   const cleanup = () => {
     socket.off("readable", tryRead)
@@ -65,7 +114,11 @@ function readLine(socket: net.Socket): Promise<string | null> {
     let line = Buffer.alloc(0)
     for (;;) {
       const byte = await readBytes(socket, 1)
-      if (byte === null) return null
+      if (byte === null) {
+        // EOF mid-line is a truncated head/chunk-size line, not a clean end.
+        if (line.byteLength > 0) throw new Error("raw-http: connection closed mid-line")
+        return null
+      }
       line = Buffer.concat([line, byte])
       if (line.subarray(-2).toString("latin1") === "\r\n") return line.toString("latin1").trim()
       if (line.byteLength > 8192) throw new Error("line too long")
@@ -112,21 +165,23 @@ export async function readHttpResponse(socket: net.Socket): Promise<RawResponse>
       if (chunked) {
         for (;;) {
           const sizeLine = await readLine(socket)
-          if (sizeLine === null) break
+          if (sizeLine === null) throw new Error("raw-http: connection closed before the terminal chunk")
           const size = Number.parseInt(sizeLine.split(";")[0], 16)
           if (!Number.isFinite(size)) throw new Error(`malformed chunk size: ${sizeLine}`)
           if (size === 0) break // trailer section is not interesting
           const chunk = await readBytes(socket, size)
-          if (chunk === null) break
+          if (chunk === null) throw new Error("raw-http: connection closed before the chunk body arrived")
           out.push(new Uint8Array(chunk))
-          await readBytes(socket, 2) // CRLF after the chunk
+          const crlf = await readBytes(socket, 2) // CRLF after the chunk
+          if (crlf === null) throw new Error("raw-http: connection closed after a chunk body without CRLF")
         }
       } else if (Number.isFinite(contentLength)) {
         const chunk = await readBytes(socket, contentLength)
-        if (chunk) out.push(new Uint8Array(chunk))
+        if (chunk === null) throw new Error("raw-http: connection closed before the content-length body arrived")
+        if (chunk.byteLength > 0) out.push(new Uint8Array(chunk))
       } else {
         for (;;) {
-          const chunk = await readBytes(socket, 65536)
+          const chunk = await readSome(socket, 65536)
           if (chunk === null) break
           out.push(new Uint8Array(chunk))
         }

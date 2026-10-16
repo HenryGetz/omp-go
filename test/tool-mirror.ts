@@ -18,7 +18,9 @@ import {
   HARNESS_ONLY_NAMES,
   HARNESS_TOOLS,
   HARNESS_TOOL_NAMES,
+  HARNESS_TOOLS_RESPONSES,
   activateHarnessTools,
+  activeExtraTools,
   htmlToMarkdown,
   isHarnessOnlyName,
   isHarnessToolPayload,
@@ -83,7 +85,7 @@ const ompLikePayload = {
 }
 assert.equal(isHarnessToolPayload(ompLikePayload), false, "omp-shaped payload is not yet the harness surface")
 
-const rewritten = rewriteFreeLanePayload(ompLikePayload) as Record<string, unknown>
+const rewritten = rewriteFreeLanePayload(ompLikePayload, { activated: true }) as Record<string, unknown>
 assert.equal(isHarnessToolPayload(rewritten), true, "rewrite must install the exact harness surface")
 assert.deepEqual(rewritten.tools, [...HARNESS_TOOLS], "rewrite must install the asset definitions verbatim")
 assert.equal(rewritten.model, "mimo-v2.6-flash-free", "rewrite must preserve every other field")
@@ -94,7 +96,80 @@ assert.ok(!names.includes("bash"), "rewrite must drop unknown-name omp tools for
 
 // Tool-less turns stay tool-less (a title/compaction call must not gain tools).
 const toolLess = { model: "mimo-v2.6-flash-free", messages: [] }
-assert.equal(rewriteFreeLanePayload(toolLess), toolLess, "a tool-less payload must be returned unchanged")
+assert.equal(rewriteFreeLanePayload(toolLess, { activated: true }), toolLess, "a tool-less payload must be returned unchanged")
+
+// The rewrite is licensed by ACTIVATION: without a confirmed harness surface
+// the host's own payload ships unchanged — advertising the 12 names the
+// registry lacks is exactly the turn-1 "Tool ... not found" failure.
+assert.equal(
+  rewriteFreeLanePayload(ompLikePayload, { activated: false }),
+  ompLikePayload,
+  "an unactivated rewrite is a no-op: the host's own tools ship",
+)
+
+// Schema injection: active tools outside the offered 12 keep their schemas in
+// the request CONTEXT (the system prompt; `instructions` on Responses) while
+// tools[] stays byte-harness-shaped and the body gains no top-level field.
+const todoSchema = {
+  type: "object",
+  properties: { op: { type: "string", enum: ["init", "start", "done"] }, list: { type: "array" } },
+  required: ["op"],
+}
+const extraTools = [
+  { name: "todo", description: "Track\n  work items", parameters: todoSchema },
+  { name: "vibe_spawn", description: "Spawn a worker", parameters: { type: "object", properties: { cli: { type: "string" } } } },
+]
+
+const withSystem = { ...ompLikePayload, messages: [{ role: "system", content: "omp system prompt" }, ...ompLikePayload.messages] }
+const injected = rewriteFreeLanePayload(withSystem, { activated: true, extraTools }) as Record<string, unknown>
+assert.deepEqual(injected.tools, [...HARNESS_TOOLS], "injection must not touch the offered tools array")
+assert.deepEqual(Object.keys(injected), Object.keys(withSystem), "injection adds no top-level body field and keeps key order")
+const injectedMessages = injected.messages as { role: string; content: string }[]
+assert.equal(injectedMessages.length, withSystem.messages.length, "injection appends, never inserts messages")
+assert.equal(injectedMessages[0]?.role, "system")
+assert.ok(injectedMessages[0]?.content.startsWith("omp system prompt"), "the original system prompt is preserved")
+assert.match(injectedMessages[0]?.content ?? "", /"name":"todo"/, "the non-offered tool's name rides the block")
+assert.match(injectedMessages[0]?.content ?? "", /"enum":\["init","start","done"\]/, "the JSON Schema rides verbatim")
+assert.ok(injectedMessages[0]?.content?.includes("Track work items"), "descriptions collapse to a single line")
+assert.ok(!(injectedMessages[0]?.content ?? "").includes("Track\n"), "no raw newline survives in the description")
+assert.match(injectedMessages[0]?.content ?? "", /never rename keys/, "the preamble names the failure this prevents")
+
+// The block rides the LAST leading system entry (closest to the conversation).
+const twoSystem = { ...withSystem, messages: [{ role: "system", content: "first" }, { role: "system", content: "second" }, ...ompLikePayload.messages] }
+const two = rewriteFreeLanePayload(twoSystem, { activated: true, extraTools }) as Record<string, unknown>
+const twoMessages = two.messages as { content: string }[]
+assert.equal(twoMessages[0]?.content, "first", "the first system entry stays untouched")
+assert.ok(twoMessages[1]?.content.startsWith("second"), "the last leading system entry carries the block")
+
+// A payload without any system message gains one at the head.
+const noSystem = rewriteFreeLanePayload(ompLikePayload, { activated: true, extraTools }) as Record<string, unknown>
+assert.equal((noSystem.messages as { role: string }[])[0]?.role, "system", "a system-less payload gains a leading system message")
+
+// Responses payloads: the block rides `instructions` (or a leading system
+// item), the tools stay flat, and again no top-level field appears.
+const responsesPayload = {
+  model: "muse-spark-1.3-contributor-free",
+  instructions: "omp system prompt",
+  input: [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+    { type: "function_call", call_id: "c1", name: "todo", arguments: "{}" },
+  ],
+  tools: [{ type: "function", name: "todo", description: "omp todo", parameters: {} }],
+  stream: true,
+}
+const injectedResponses = rewriteFreeLanePayload(responsesPayload, { activated: true, extraTools }) as Record<string, unknown>
+assert.deepEqual(injectedResponses.tools, [...HARNESS_TOOLS_RESPONSES], "the flat harness surface for the Responses protocol")
+assert.deepEqual(Object.keys(injectedResponses), Object.keys(responsesPayload), "responses injection adds no top-level field")
+const instructions = injectedResponses.instructions
+assert.ok(typeof instructions === "string" && instructions.startsWith("omp system prompt"), "instructions keep their prefix")
+assert.ok(typeof instructions === "string" && instructions.includes('"name":"vibe_spawn"'), "the block rides the instructions field")
+
+const { instructions: _drop, ...responsesNoInstructions } = responsesPayload
+const injectedInput = rewriteFreeLanePayload(responsesNoInstructions, { activated: true, extraTools }) as Record<string, unknown>
+const firstItem = (injectedInput.input as Record<string, unknown>[])[0]
+assert.equal(firstItem?.role, "system", "a payload without instructions gains a leading system item")
+const leadingText = (firstItem?.content as { text?: string }[] | undefined)?.[0]?.text
+assert.ok(typeof leadingText === "string" && leadingText.includes('"name":"todo"'), "the leading system item carries the block")
 
 // --- 3. Argument shim --------------------------------------------------------
 
@@ -183,6 +258,30 @@ assert.ok(harness.active().includes("read"), "activation must preserve the exist
 const empty = fakePi([])
 assert.equal(await activateHarnessTools(empty.pi, "opencode-free"), false, "an empty active snapshot is never clobbered")
 
+// The return contract: true whenever the harness surface RESOLVES (freshly
+// activated or already active) — the caller's licence to advertise the 12.
+assert.equal(
+  await activateHarnessTools(harness.pi, "opencode-free"),
+  true,
+  "an already-active harness surface still reports true",
+)
+
+// Colliding rebuild: the active set becomes non-harness tools + the 12, and
+// the second call (nothing left to change) still reports true.
+const rebuiltSession = fakePi(["read", "edit", "glob", "grep", "write", "bash"])
+registerCollidingHarnessTools(rebuiltSession.pi)
+assert.equal(await activateHarnessTools(rebuiltSession.pi, "opencode-free", true), true, "a rebuilt free-lane set activates")
+assert.deepEqual(
+  [...rebuiltSession.active()].toSorted(),
+  [...HARNESS_TOOL_NAMES, "bash"].toSorted(),
+  "the rebuilt set keeps non-harness tools and installs the 12",
+)
+assert.equal(
+  await activateHarnessTools(rebuiltSession.pi, "opencode-free", true),
+  true,
+  "an already-rebuilt set still reports true",
+)
+
 // Colliding-name wrappers re-register the omp built-ins with the harness schema
 // and delegate to the native tool through `ctx.invokeTool`.
 const colliding = fakePi(["read", "edit", "glob", "grep", "write"])
@@ -232,6 +331,40 @@ assert.equal(harness.execCalls[0].command, "bash", "shell wrapper must use the s
 assert.deepEqual(harness.execCalls[0].args, ["-c", "echo hi"], "shell wrapper must pass the command to bash -c")
 assert.match(result.content[0] && "text" in result.content[0] ? result.content[0].text : "", /hello from tool/, "shell output must surface")
 
+// --- 4b. Context schemas: active non-offered tools ---------------------------
+
+{
+  const registry = [
+    { name: "read", description: "omp read", parameters: { type: "object" } }, // offered -> excluded
+    { name: "bash", description: "Run a\ncommand", parameters: { type: "object", properties: { command: {} } } },
+    { name: "todo", description: "todos", parameters: todoSchema },
+    { name: "task", description: "delegate", parameters: { type: "object" } }, // inactive -> excluded
+    { name: "shell", description: "harness shell", parameters: { type: "object" } }, // inactive wrapper -> excluded
+    { name: "todo", description: "re-registered", parameters: { type: "object" } }, // duplicate -> deduped
+  ]
+  const session = {
+    getActiveTools: () => ["read", "bash", "todo"],
+    getAllTools: () => registry,
+  } as unknown as ExtensionAPI
+  const extra = activeExtraTools(session)
+  assert.deepEqual(extra.map((tool) => tool.name), ["bash", "todo"], "active non-offered tools only, deduped")
+  assert.equal(extra[0]?.description, "Run a\ncommand", "descriptions come from the registry verbatim (collapsed at render)")
+  assert.equal(extra[1]?.parameters, todoSchema, "the registry schema rides verbatim")
+}
+{
+  const noRegistry = fakePi(["bash"])
+  assert.deepEqual(activeExtraTools(noRegistry.pi), [], "a host without getAllTools contributes no schemas")
+}
+{
+  const throwing = {
+    getActiveTools: () => ["bash"],
+    getAllTools: () => {
+      throw new Error("registry gone")
+    },
+  } as unknown as ExtensionAPI
+  assert.deepEqual(activeExtraTools(throwing), [], "a failing registry read degrades to no schemas")
+}
+
 // --- 5. Helpers --------------------------------------------------------------
 
 assert.equal(isHarnessOnlyName("shell"), true, "shell is a harness-only name")
@@ -242,4 +375,4 @@ assert.match(
   "HTML→markdown extraction keeps headings and links",
 )
 
-console.log("TOOL-MIRROR OK: harness asset exact, payload rewrite + shims + wrappers verified")
+console.log("TOOL-MIRROR OK: harness asset exact, payload rewrite + context schemas + shims + wrappers verified")

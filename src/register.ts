@@ -41,6 +41,7 @@ import { catalogModels, fetchCatalogModels, fetchFreeModels, freeModels, usesRes
 import { OPENCODE_GO_PROVIDER, opencodeGoUsageProvider } from "./usage"
 import {
   activateHarnessTools,
+  activeExtraTools,
   registerCollidingHarnessTools,
   registerHarnessTools,
   rewriteFreeLanePayload,
@@ -358,34 +359,41 @@ export function registerOpencodeGo(
   writeModelsOverride({ identity })
   pi.registerProvider(OPENCODE_GO_PROVIDER, goConfig)
   pi.registerProvider(FREE_PROVIDER, freeConfig)
-  // Wrappers register unconditionally (defaultInactive, and the harness's
+  // Wrappers register unconditionally ONCE (defaultInactive, and the harness's
   // lowercase names do not collide with omp's capitalized built-ins); the
-  // free-lane ACTIVATION below is what turns them on.
+  // free-lane ACTIVATION below is what turns them on. The tool-mirror rewrite
+  // (src/tool-mirror.ts) swaps the request's `tools` array for the harness's
+  // fingerprinted 12 — the wrappers carry those exact schemas and the real
+  // behaviour — and the Go lane's traffic stays untouched.
   registerCollidingHarnessTools(pi)
   registerHarnessTools(pi)
 
-  // Free-tier tool mirror (src/tool-mirror.ts): the keyless gateway fingerprints
-  // the `tools` array. Wrapper tools carry the harness's exact schemas and real
-  // behaviour; they stay inactive on the Go lane so its traffic is unchanged and
-  // are switched on for an `opencode-free` session.
-  registerHarnessTools(pi)
-  let collidingRegistered = false
-  const ensureHarnessTools = async (ctx: { model?: Model<Api> }): Promise<void> => {
+  const ensureHarnessTools = async (ctx: { model?: Model<Api> }): Promise<boolean> => {
     const provider = ctx.model?.provider
-    if (provider !== FREE_PROVIDER) return
+    if (provider !== FREE_PROVIDER) return false
     // The colliding wrappers re-register omp's read/edit/glob/grep/write, so
     // this runs only on a free-lane session — the Go lane keeps the built-ins.
     // Registration happens at plugin setup now; only activation is gated.
     // includeColliding: the five colliding wrappers replace omp's built-ins,
     // so the active set must be rebuilt (not merely extended) or their calls
     // resolve to stale entries ("Tool read/write not found").
-    await activateHarnessTools(pi, provider, true)
+    // The boolean is the rewrite licence: true only when the harness surface
+    // RESOLVES (freshly activated or already active).
+    try {
+      return await activateHarnessTools(pi, provider, true)
+    } catch {
+      return false
+    }
   }
   // Returned (awaited by the harness), not fire-and-forget: the tool set must
   // be fully registered AND active before the agent's first tool call, or the
   // host answers the model's `write`/`shell` with "Tool ... not found".
-  pi.on("session_start", (_event, ctx) => ensureHarnessTools(ctx).catch(() => undefined))
-  pi.on("before_agent_start", (_event, ctx) => ensureHarnessTools(ctx).catch(() => undefined))
+  pi.on("session_start", async (_event, ctx) => {
+    await ensureHarnessTools(ctx)
+  })
+  pi.on("before_agent_start", async (_event, ctx) => {
+    await ensureHarnessTools(ctx)
+  })
   // The free lane's built payload carries the harness's own `tools` array; the
   // Go lane keeps whatever omp built. Activation is AWAITED here — the earlier
   // fire-and-forget activation raced the first turn, so the model saw `shell`
@@ -393,8 +401,19 @@ export function registerOpencodeGo(
   // found"). Ordering is now guaranteed: active tools before the request.
   pi.on("before_provider_request", async (event, ctx) => {
     if (ctx.model?.provider !== FREE_PROVIDER) return undefined
-    await ensureHarnessTools(ctx).catch(() => undefined)
-    return rewriteFreeLanePayload(event.payload)
+    const activated = await ensureHarnessTools(ctx)
+    // Never advertise the harness names without a confirmed harness surface:
+    // when the active set never established, the rewrite would offer tools the
+    // host cannot resolve ("Tool write not found" on turn 1) — the host's own
+    // payload resolves its own names, so it ships unchanged. When activated,
+    // the ACTIVE tools outside the offered 12 keep their schemas visible in the
+    // request context (src/tool-mirror.ts): dropped from `tools[]` by the
+    // rewrite but still executable, a model that never sees them improvises
+    // their argument shapes and fails host validation.
+    return rewriteFreeLanePayload(event.payload, {
+      activated,
+      extraTools: activated ? activeExtraTools(pi) : [],
+    })
   })
 
   return oauth
