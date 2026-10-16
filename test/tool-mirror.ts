@@ -386,6 +386,18 @@ assert.match(result.content[0] && "text" in result.content[0] ? result.content[0
   } as unknown as ExtensionAPI
   const [entry] = activeExtraTools(session)
   assert.deepEqual(entry?.parameters, emitted, "an omptype schema instance is emitted as real JSON Schema")
+  // The real omptype instances are FUNCTIONs (own length/name/ir, prototype
+  // methods) — a typeof "object" guard would skip exactly those.
+  const fnInstance = Object.assign(() => undefined, { toJsonSchema: () => emitted })
+  const fnSession = {
+    getActiveTools: () => ["fnTool"],
+    getAllTools: () => [{ name: "fnTool", description: "d", parameters: fnInstance }],
+  } as unknown as ExtensionAPI
+  assert.deepEqual(
+    activeExtraTools(fnSession)[0]?.parameters,
+    emitted,
+    "omptype FUNCTION instances emit their schema too",
+  )
   const broken = {
     toJsonSchema: () => {
       throw new Error("boom")

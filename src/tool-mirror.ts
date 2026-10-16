@@ -703,7 +703,9 @@ export async function activateHarnessTools(
  * already carry plain JSON and pass through untouched.
  */
 function jsonSchemaOf(parameters: unknown): unknown {
-  if (parameters !== null && typeof parameters === "object") {
+  // omptype schemas are FUNCTION instances (own length/name/ir, methods on the
+  // prototype) — a plain `typeof === "object"` guard skips exactly them.
+  if (parameters !== null && (typeof parameters === "object" || typeof parameters === "function")) {
     const candidate = parameters as { toJsonSchema?: () => Record<string, unknown> }
     if (typeof candidate.toJsonSchema === "function") {
       try {
