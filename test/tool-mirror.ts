@@ -126,10 +126,11 @@ assert.deepEqual(injected.tools, [...HARNESS_TOOLS], "injection must not touch t
 assert.deepEqual(Object.keys(injected), Object.keys(withSystem), "injection adds no top-level body field and keeps key order")
 const injectedMessages = injected.messages as { role: string; content: string }[]
 assert.equal(injectedMessages.length, withSystem.messages.length, "injection appends, never inserts messages")
-assert.equal(injectedMessages[0]?.role, "system")
-assert.ok(injectedMessages[0]?.content.startsWith("omp system prompt"), "the original system prompt is preserved")
-const systemBlock = injectedMessages[0]?.content ?? ""
-const fence = /```json\n([\s\S]*?)\n```/.exec(systemBlock)
+assert.equal(injectedMessages[0]?.content, "omp system prompt", "the system prompt stays untouched")
+assert.equal(injectedMessages[1]?.role, "user", "the block rides the LAST USER message — next to the task that triggers the call")
+const userBlock = injectedMessages[1]?.content ?? ""
+assert.ok(userBlock.startsWith("hi"), "the user message keeps its prefix")
+const fence = /```json\n([\s\S]*?)\n```/.exec(userBlock)
 assert.ok(fence, "the block carries a fenced JSON list")
 const blockEntries = JSON.parse(fence?.[1] ?? "[]") as { name: string; description: string; parameters: unknown }[]
 const blockTodo = blockEntries.find((entry) => entry.name === "todo")
@@ -137,18 +138,35 @@ assert.ok(blockTodo, "the non-offered tool's name rides the block")
 assert.deepEqual(blockTodo?.parameters, todoSchema, "the JSON Schema rides verbatim")
 assert.ok(blockTodo?.description.includes("Track work items"), "descriptions collapse to a single line")
 assert.ok(!(blockTodo?.description ?? "").includes("\n"), "no raw newline survives in the description")
-assert.match(systemBlock, /never rename keys/, "the preamble names the failure this prevents")
+assert.match(userBlock, /never rename keys/, "the preamble names the failure this prevents")
 
-// The block rides the LAST leading system entry (closest to the conversation).
-const twoSystem = { ...withSystem, messages: [{ role: "system", content: "first" }, { role: "system", content: "second" }, ...ompLikePayload.messages] }
-const two = rewriteFreeLanePayload(twoSystem, { activated: true, extraTools }) as Record<string, unknown>
-const twoMessages = two.messages as { content: string }[]
-assert.equal(twoMessages[0]?.content, "first", "the first system entry stays untouched")
-assert.ok(twoMessages[1]?.content.startsWith("second"), "the last leading system entry carries the block")
+// Later turns stay untouched: only the LAST user message carries the block.
+const twoUsers = {
+  ...ompLikePayload,
+  messages: [
+    { role: "user", content: "earlier question" },
+    { role: "assistant", content: "earlier answer" },
+    { role: "user", content: "hi" },
+  ],
+}
+const two = rewriteFreeLanePayload(twoUsers, { activated: true, extraTools }) as Record<string, unknown>
+const twoMessages = two.messages as { role: string; content: string }[]
+assert.equal(twoMessages[0]?.content, "earlier question", "earlier turns stay untouched")
+assert.equal(twoMessages[1]?.content, "earlier answer", "assistant history stays untouched")
+assert.ok(twoMessages[2]?.content.startsWith("hi"), "the latest user message carries the block")
 
-// A payload without any system message gains one at the head.
+// Payloads without a user message fall back to the LAST leading system entry.
+const systemOnly = { ...ompLikePayload, messages: [{ role: "system", content: "first" }, { role: "system", content: "second" }] }
+const fallback = rewriteFreeLanePayload(systemOnly, { activated: true, extraTools }) as Record<string, unknown>
+const fallbackMessages = fallback.messages as { content: string }[]
+assert.equal(fallbackMessages[0]?.content, "first", "the first system entry stays untouched")
+assert.ok(fallbackMessages[1]?.content.startsWith("second"), "the last leading system entry carries the block")
+
+// A user-only payload carries the block on its user message; nothing is inserted.
 const noSystem = rewriteFreeLanePayload(ompLikePayload, { activated: true, extraTools }) as Record<string, unknown>
-assert.equal((noSystem.messages as { role: string }[])[0]?.role, "system", "a system-less payload gains a leading system message")
+const noSystemMessages = noSystem.messages as { role: string; content: string }[]
+assert.equal(noSystemMessages.length, ompLikePayload.messages.length, "no message is inserted")
+assert.ok(noSystemMessages[0]?.content.startsWith("hi"), "a system-less payload carries the block on its user message")
 
 // Responses payloads: the block rides `instructions` (or a leading system
 // item), the tools stay flat, and again no top-level field appears.

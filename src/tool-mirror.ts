@@ -178,18 +178,30 @@ function appendTextContent(content: unknown, block: string, textType: string): u
 }
 
 /**
- * Append `block` to the payload's system context: the LAST leading
- * system/developer message (chat) or the `instructions` field / a leading
- * system item (Responses). Appending keeps the block adjacent to the
- * conversation on both protocols without adding a top-level body field or
- * disturbing the fingerprinted `tools` array. A payload whose carrier is
- * missing is returned unchanged — the rewrite never invents one.
+ * Append `block` to the payload's request context without adding a top-level
+ * body field or disturbing the fingerprinted `tools` array.
+ *
+ * Chat payloads: the LAST user message — the sentence that triggers the tool
+ * call is right above it, and the live gate showed a system-level block being
+ * scanned past (todo improvised with its full schema sitting unread in the
+ * system prompt). Payloads without a user message fall back to the LAST
+ * leading system/developer message. Responses payloads keep the system
+ * context: the `instructions` field, else a leading system item.
  */
 function injectContextBlock(payload: Record<string, unknown>, block: string, responses: boolean): Record<string, unknown> {
   const containerKey = responses ? "input" : "messages"
   const container = payload[containerKey]
   if (!Array.isArray(container)) return payload
   const items = container.slice()
+  if (!responses) {
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const role = (items[index] as { role?: unknown } | null)?.role
+      if (role !== "user") continue
+      const message = items[index] as Record<string, unknown>
+      items[index] = { ...message, content: appendTextContent(message.content, block, "text") }
+      return { ...payload, messages: items }
+    }
+  }
   let target = -1
   for (let index = 0; index < items.length; index += 1) {
     const role = (items[index] as { role?: unknown } | null)?.role
