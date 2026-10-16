@@ -28,11 +28,20 @@
 // lane's tool surface (and therefore its request bytes) is untouched.
 //
 // The replacement SPLITS the surface: omp's own executable tools that are not
-// among the 12 (todo, task, vibe_*, …) stay active on the host but vanish from
-// the wire, so the model improvises their argument shapes from history and
-// fails host validation. They are NOT added to `tools[]` — the offered array
-// stays byte-harness-shaped (the gateway fingerprint-checks it) — their
-// schemas ride the request context as one compact block instead.
+// among the 12 (todo, task, vibe_*, …) stay active on the host but drop out of
+// the offered array, and each protocol gets the repair that keeps them
+// callable (see rewriteFreeLanePayload's docstring for the wire evidence):
+//
+//   chat/completions — their schemas ride the request context as one compact
+//   block appended to the LAST USER message; the gateway preserves argument
+//   bytes for any callable name there, so `tools[]` stays byte-harness-shaped.
+//
+//   Responses — the serving stack DROPS argument bytes for names outside
+//   `tools[]` (wire capture 2026-10-16: zero argument deltas, `done: "{}"`
+//   while offered names stream full JSON), so the active non-offered tools
+//   EXTEND `tools[]` after the golden 12 instead (gate rule 3: unknown names
+//   carry any schema), and src/sse-normalize.ts makes any residual
+//   zero-argument unoffered call fail loudly on the way back.
 
 import { readFileSync } from "node:fs"
 import type {
