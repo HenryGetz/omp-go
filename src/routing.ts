@@ -148,6 +148,13 @@ export function noteUsageOrg(orgId: string | undefined, usedPct: number): void {
     state.usedPct = Math.min(1, Math.max(0, usedPct))
     state.usedPctAtMs = Date.now()
   })
+  // A window that hit 100% is exhausted exactly like a verdict: its pinned
+  // sessions must move to the healthy sibling or they drain in place on a dead
+  // account forever (2026-10-16: 69/69 pins stayed on the Weekly-100% account
+  // while the pool held a 39%-used sibling — nothing ever moved them, because
+  // no VERDICT ever landed on that org). Same fire-and-forget contract as a
+  // verdict re-pin; no-op in processes that never pinned a session.
+  if (usedPct >= 1) void repinAfterVerdict(orgId)
 }
 
 /** One stored account as the router sees it. */
@@ -179,7 +186,12 @@ export function chooseAccount(
   candidates: readonly RoutingCandidate[],
   spillAtUsed: number = SPILL_AT_USED,
 ): number | undefined {
-  const usable = candidates.filter((candidate) => candidate.state !== "depleted")
+  // `used >= 1` is a spent window: never start a session there, exactly like
+  // a depleted account (its next request is a capacity rejection). If the
+  // whole pool is spent, defer to core's ranking like the all-depleted case.
+  const usable = candidates.filter(
+    (candidate) => candidate.state !== "depleted" && usedFractionOf(candidate) < 1,
+  )
   if (usable.length === 0) return undefined
   const scored = usable.map((candidate) => ({ candidate, used: usedFractionOf(candidate) }))
   // Spill: prefer accounts that still have room. When none do ("both at 90%"),
@@ -311,8 +323,11 @@ function noteSessionPin(sessionId: string, orgId: string | undefined, credential
 
 /**
  * Move every session pinned to `verdictOrgId` onto a healthy sibling. Called
- * when an account verdict lands (src/region.ts); best-effort and fire-and-
- * forget — the in-turn rotation remains the first line of defense.
+ * when an account verdict lands (src/region.ts) AND when a usage poll reports
+ * that org's window at 100% (noteUsageOrg above) — both mean "this account no
+ * longer serves", and pins that never move are what glued every session to the
+ * exhausted account. Best-effort and fire-and-forget — the in-turn rotation
+ * remains the first line of defense.
  */
 export async function repinAfterVerdict(verdictOrgId: string | undefined, provider = "opencode-go"): Promise<void> {
   if (!hostApi || !verdictOrgId) return

@@ -26,6 +26,13 @@
 // with the harness's exact schemas + real behaviour. They are `defaultInactive`
 // and only activated on an `opencode-free` session, so the working `opencode-go`
 // lane's tool surface (and therefore its request bytes) is untouched.
+//
+// The replacement SPLITS the surface: omp's own executable tools that are not
+// among the 12 (todo, task, vibe_*, …) stay active on the host but vanish from
+// the wire, so the model improvises their argument shapes from history and
+// fails host validation. They are NOT added to `tools[]` — the offered array
+// stays byte-harness-shaped (the gateway fingerprint-checks it) — their
+// schemas ride the request context as one compact block instead.
 
 import { readFileSync } from "node:fs"
 import type {
@@ -81,6 +88,9 @@ type WrapperSchema = Record<string, unknown> & { static: Record<string, unknown>
 
 const HARNESS_ONLY: Record<string, boolean> = Object.fromEntries(HARNESS_ONLY_NAMES.map((name) => [name, true]))
 
+/** The offered harness surface: already visible to the model through `tools[]`. */
+const OFFERED: Record<string, boolean> = Object.fromEntries(HARNESS_TOOL_NAMES.map((name) => [name, true]))
+
 const str = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined)
 const num = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) ? value : undefined)
 
@@ -109,19 +119,140 @@ export const HARNESS_TOOLS_RESPONSES: readonly Record<string, unknown>[] = HARNE
 }))
 
 /**
+ * A tool the offered `tools` array omits, as it rides the context block. The
+ * model needs its name, a one-line description, and the full JSON Schema —
+ * host validation enforces the schema, so the schema is never truncated.
+ */
+export type ExtraToolSchema = {
+  name: string
+  description: string
+  parameters: unknown
+}
+
+/** Collapse prose to a single bounded line (the block rides every free turn). */
+function oneLine(description: unknown): string {
+  const flat = typeof description === "string" ? description.replace(/\s+/g, " ").trim() : ""
+  return flat.length > 300 ? `${flat.slice(0, 300)}…` : flat
+}
+
+/**
+ * The context block: one compact JSON list of the session's non-offered active
+ * tools. The preamble names the exact failure this prevents — a model calling
+ * tools it was never shown and inventing their argument shapes from history.
+ */
+function renderExtraToolsBlock(tools: readonly ExtraToolSchema[]): string {
+  const entries = tools.map((tool) => ({
+    name: tool.name,
+    description: oneLine(tool.description),
+    parameters: tool.parameters ?? { type: "object", properties: {} },
+  }))
+  return [
+    "## Additional tools active in this session",
+    "The tools below are active and fully callable in this session even though they are not in the `tools` array (the free gateway only accepts the harness's own tool surface there). Call them by name with arguments matching the given JSON Schema exactly: never rename keys, invent enum values, or reuse an argument shape from earlier history.",
+    `\`\`\`json\n${JSON.stringify(entries)}\n\`\`\``,
+  ].join("\n\n")
+}
+
+/** Append `block` to a message's text content — string or typed text parts. */
+function appendTextContent(content: unknown, block: string, textType: string): unknown {
+  if (typeof content === "string") return `${content}\n\n${block}`
+  if (Array.isArray(content)) {
+    const parts = content.slice()
+    for (let index = parts.length - 1; index >= 0; index -= 1) {
+      const part = parts[index]
+      const text = part && typeof part === "object" ? (part as { text?: unknown }).text : undefined
+      if (typeof text === "string") {
+        parts[index] = { ...(part as Record<string, unknown>), text: `${text}\n\n${block}` }
+        return parts
+      }
+    }
+    parts.push({ type: textType, text: block })
+    return parts
+  }
+  return block
+}
+
+/**
+ * Append `block` to the payload's system context: the LAST leading
+ * system/developer message (chat) or the `instructions` field / a leading
+ * system item (Responses). Appending keeps the block adjacent to the
+ * conversation on both protocols without adding a top-level body field or
+ * disturbing the fingerprinted `tools` array. A payload whose carrier is
+ * missing is returned unchanged — the rewrite never invents one.
+ */
+function injectContextBlock(payload: Record<string, unknown>, block: string, responses: boolean): Record<string, unknown> {
+  const containerKey = responses ? "input" : "messages"
+  const container = payload[containerKey]
+  if (!Array.isArray(container)) return payload
+  const items = container.slice()
+  let target = -1
+  for (let index = 0; index < items.length; index += 1) {
+    const role = (items[index] as { role?: unknown } | null)?.role
+    if (role === "system" || role === "developer") target = index
+    else break
+  }
+  if (target >= 0) {
+    const item = items[target] as Record<string, unknown>
+    items[target] = { ...item, content: appendTextContent(item.content, block, responses ? "input_text" : "text") }
+    return { ...payload, [containerKey]: items }
+  }
+  if (responses) {
+    if (typeof payload.instructions === "string")
+      return { ...payload, instructions: `${payload.instructions}\n\n${block}` }
+    items.unshift({ type: "message", role: "system", content: [{ type: "input_text", text: block }] })
+    return { ...payload, input: items }
+  }
+  items.unshift({ role: "system", content: block })
+  return { ...payload, messages: items }
+}
+
+/**
+ * State of the free-lane session at rewrite time. `activated` is the
+ * never-advertise-without-activation guard: the harness names may reach the
+ * wire only when activation confirmed them, or the host answers every harness
+ * call with "Tool ... not found". `extraTools` carries the ACTIVE tools the
+ * offered surface omits; their schemas ride the request context.
+ */
+export type FreeLaneRewriteState = {
+  activated: boolean
+  extraTools?: readonly ExtraToolSchema[]
+}
+
+/**
  * Replace a built provider payload's `tools` array with the harness's exact 12.
  * Returns the payload unchanged when it carries no tools (a tool-less turn —
- * e.g. a title/compaction call — must not gain a tool surface it never had).
- * Shape follows the protocol: flat tools for Responses payloads (`input`),
- * chat-wrapped for completions payloads (`messages`).
+ * e.g. a title/compaction call — must not gain a tool surface it never had),
+ * and unchanged when `state.activated` is not true (the host's own payload
+ * resolves its own tool names). Shape follows the protocol: flat tools for
+ * Responses payloads (`input`), chat-wrapped for completions payloads
+ * (`messages`).
+ *
+ * The swap also SPLITS the tool surface: every active tool outside the 12 is
+ * dropped from `tools[]` yet stays executable by the host. To keep every
+ * executable tool visible, `state.extraTools` schemas are injected into the
+ * request CONTEXT — appended to the system prompt (`instructions` on the
+ * Responses protocol) as one compact block — without touching the
+ * fingerprinted `tools` array or adding a top-level body field.
  */
-export function rewriteFreeLanePayload(payload: unknown): unknown {
+export function rewriteFreeLanePayload(payload: unknown, state: FreeLaneRewriteState): unknown {
   if (typeof payload !== "object" || payload === null || !("tools" in payload)) return payload
   const tools = payload.tools
   if (!Array.isArray(tools) || tools.length === 0) return payload
-  const responses = "input" in payload && !("messages" in payload)
+  if (state.activated !== true) return payload
+  const record = payload as Record<string, unknown>
+  const responses = "input" in record && !("messages" in record)
   const surface = responses ? HARNESS_TOOLS_RESPONSES : HARNESS_TOOLS
-  return { ...payload, tools: surface.map((tool) => tool) }
+  let next: Record<string, unknown> = { ...record, tools: surface.map((tool) => tool) }
+  const extra = state.extraTools ?? []
+  if (extra.length > 0) {
+    const block = renderExtraToolsBlock(extra)
+    if (responses) {
+      if (typeof next.instructions === "string" || Array.isArray(next.input)) next = injectContextBlock(next, block, true)
+    } else if (Array.isArray(next.messages)) {
+      next = injectContextBlock(next, block, false)
+    }
+  }
+  return next
 }
 
 /** True when a payload's `tools` array is the harness's exact 12, in order. */
@@ -499,6 +630,11 @@ export function registerHarnessTools(pi: ExtensionAPI): void {
  * `includeColliding` must be true only after {@link registerCollidingHarnessTools}
  * has run, so the colliding names resolve to the wrappers rather than the
  * built-ins.
+ *
+ * Returns true when the harness tool surface is ACTIVE — the caller's licence
+ * to advertise the harness names on the wire (see {@link rewriteFreeLanePayload}).
+ * False means this is not the free lane or the active set never established
+ * (the 30 s wait exhausted): the request must then keep the host's own tools.
  */
 export async function activateHarnessTools(
   pi: ExtensionAPI,
@@ -532,14 +668,46 @@ export async function activateHarnessTools(
       ...active.filter((name) => !HARNESS_TOOL_NAMES.includes(name) && !COLLIDING_NAMES.includes(name)),
       ...HARNESS_TOOL_NAMES,
     ]
-    if (rebuilt.length === active.length && HARNESS_TOOL_NAMES.every((name) => active.includes(name))) return false
+    // Already fully active: the surface resolves even though nothing changed.
+    if (rebuilt.length === active.length && HARNESS_TOOL_NAMES.every((name) => active.includes(name))) return true
     await pi.setActiveTools(rebuilt)
     return true
   }
   const missing = HARNESS_ONLY_NAMES.filter((name) => !active.includes(name))
-  if (missing.length === 0) return false
-  await pi.setActiveTools([...active, ...missing])
+  if (missing.length > 0) await pi.setActiveTools([...active, ...missing])
   return true
+}
+
+/**
+ * The session's ACTIVE tools the offered surface omits, with their registry
+ * schemas. The rewrite offers only the harness 12, yet the host keeps
+ * executing these — a model that never sees their schemas improvises argument
+ * shapes and fails host validation ("Invalid todo arguments…",
+ * "vibe_spawn … (was missing)"). Deduped (a re-registered name resolves to the
+ * latest registration); only tools actually active in the session qualify.
+ */
+export function activeExtraTools(pi: ExtensionAPI): ExtraToolSchema[] {
+  let active: string[]
+  let all: { name?: unknown; description?: unknown; parameters?: unknown }[]
+  try {
+    active = pi.getActiveTools()
+    all = typeof pi.getAllTools === "function" ? pi.getAllTools() : []
+  } catch {
+    return []
+  }
+  const activeSet = new Set(active)
+  const seen = new Set<string>()
+  const extra: ExtraToolSchema[] = []
+  for (const info of all) {
+    const name = typeof info?.name === "string" ? info.name : undefined
+    if (name === undefined) continue
+    if (OFFERED[name] === true) continue // already visible through the offered tools[]
+    if (!activeSet.has(name)) continue
+    if (seen.has(name)) continue
+    seen.add(name)
+    extra.push({ name, description: typeof info.description === "string" ? info.description : "", parameters: info.parameters })
+  }
+  return extra
 }
 
 /** Test seam: the harness definitions as a name→function record. */

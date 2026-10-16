@@ -23,10 +23,23 @@ export type AccountVerdict = {
   kind: "funds" | "workspace" | "region"
   message: string
   at: number
+  /**
+   * The account's own reset horizon when the failure stated one (a retry-after
+   * or reset timestamp on the error): the verdict stays live at least until
+   * then, even past VERDICT_TTL_MS — a 2d 12h window must not heal into the
+   * ranking after 30 minutes.
+   */
+  until?: number
 }
 
 const verdicts = new Map<string, AccountVerdict>()
 export const VERDICT_TTL_MS = 30 * 60 * 1000
+
+/** A verdict is live while inside its TTL or before its stated reset horizon. */
+function verdictLive(verdict: AccountVerdict, now: number): boolean {
+  if (now - verdict.at <= VERDICT_TTL_MS) return true
+  return verdict.until !== undefined && now < verdict.until
+}
 
 function verdictsFile(): string {
   return path.join(process.env.HOME || homedir(), ".omp", "agent", "omp-go-verdicts.json")
@@ -43,9 +56,17 @@ function loadOrgVerdicts(): Record<string, AccountVerdict> {
       const at = "at" in entry ? entry.at : undefined
       const kind = "kind" in entry ? entry.kind : undefined
       const message = "message" in entry ? entry.message : undefined
-      if (typeof at !== "number" || now - at > VERDICT_TTL_MS) continue
+      if (typeof at !== "number") continue
       if (kind !== "funds" && kind !== "workspace" && kind !== "region") continue
-      state[orgId] = { kind, message: typeof message === "string" ? message : "", at }
+      const until = "until" in entry ? entry.until : undefined
+      const verdict: AccountVerdict = {
+        kind,
+        message: typeof message === "string" ? message : "",
+        at,
+        ...(typeof until === "number" ? { until } : {}),
+      }
+      if (!verdictLive(verdict, now)) continue
+      state[orgId] = verdict
     }
     return state
   } catch {
@@ -83,7 +104,7 @@ export function accountVerdict(token: string | undefined): AccountVerdict | unde
   if (!token) return undefined
   const verdict = verdicts.get(token)
   if (!verdict) return undefined
-  if (Date.now() - verdict.at > VERDICT_TTL_MS) {
+  if (!verdictLive(verdict, Date.now())) {
     verdicts.delete(token)
     return undefined
   }

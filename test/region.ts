@@ -184,3 +184,50 @@ console.log("ACCOUNT-GATE OK: denials rotate, demote the account in health, and 
   assert.doesNotMatch(serialized, /retryAfterMs|waitTimeMs|resetAt/i, "wait-typed fields are removed")
   assert.doesNotMatch(error?.message ?? "", /retry[ =:]+\d/i, "no retry-after text in the message")
 }
+
+// Membership vs capacity: a 403 "Workspace access denied" is a
+// membership/pairing failure — the signature of a bearer carrying a foreign or
+// missing org stamp (the 2026-10-16 incident: 17 straight 403s against the
+// HEALTHY account while every mis-written note called it capacity). The
+// wording must say what it is; the 402 keeps the capacity wording because
+// that one IS the account's own window.
+{
+  const src = createAssistantMessageEventStream()
+  const out = mapRegionGateErrors(src)
+  src.fail({ status: 403, message: "Workspace access denied", type: "permission_error" })
+  const error = await failureOf(out)
+  assert.match(error?.message ?? "", /workspace membership rejected this account/, "403 body reads as membership")
+  assert.match(error?.message ?? "", /stamp\/pairing problem, not a capacity window/, "note names the real cause")
+  assert.doesNotMatch(error?.message ?? "", /workspace capacity rejected/, "never calls a membership failure capacity")
+
+  const src2 = createAssistantMessageEventStream()
+  const out2 = mapRegionGateErrors(src2)
+  src2.fail({ status: 402, message: "Upstream request failed: Insufficient account funds", type: "server_error" })
+  const error2 = await failureOf(out2)
+  assert.match(error2?.message ?? "", /account member capacity exhausted for this window/, "402 keeps the capacity wording")
+}
+
+// The verdict outlives its stated reset horizon: the numeric waits are read
+// BEFORE they are stripped from the thrown error, so a 2d 12h window verdict
+// does not heal into the ranking after the 30-minute default TTL.
+{
+  clearAccountVerdicts()
+  const src = createAssistantMessageEventStream()
+  const out = mapRegionGateErrors(src, "tok-secret-abcdef", "org_known")
+  src.fail({
+    status: 402,
+    message: "Upstream request failed: Insufficient account funds (resets in 2d 12h)",
+    type: "server_error",
+    retryAfterMs: 1732329,
+    data: { error: { code: "funds", retryAfterMs: 1732329, waitTimeMs: 1732329, resetAt: 1792028239109 } },
+  })
+  const error = await failureOf(out)
+  const verdict = orgVerdict("org_known")
+  assert.ok(verdict, "verdict recorded")
+  assert.ok(verdict.until !== undefined, "reset horizon captured before the wait hints were stripped")
+  const at = verdict.at
+  assert.ok((verdict.until ?? 0) - at >= 1732329 - 1000, "verdict lives at least the stated retry-after")
+  assert.ok((verdict.until ?? 0) >= 1792028239109 - 1000, "an absolute resetAt wins when it is the longer horizon")
+  assert.doesNotMatch(JSON.stringify(error ?? {}), /1732329/, "horizon never leaks back into the thrown error")
+  clearAccountVerdicts()
+}

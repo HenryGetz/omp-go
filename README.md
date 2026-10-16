@@ -128,6 +128,7 @@ cost several times more than one that consolidates. With two or more
 | leader has headroom | the warm leader (whichever account served last) | stay pinned |
 | leader ≥ 90% used | the sibling (spill) | the leader drains — its cache is warm there |
 | every account ≥ 90% used | the warm leader ("at that point it doesn't matter") | stay pinned |
+| an account's window hits 100% | never that account | pins re-pin to the sibling |
 | the pinned account fails | healthy sibling (rotation) | rotate with it |
 
 The pin is made through omp's own auth API as an *explicit* pin: usage
@@ -174,10 +175,17 @@ always one of its own rungs.
 - **Account switching that learns.** The pool ranks accounts by remaining
   quota, which makes a broken account at 0% look like the best pick. Inference
   verdicts (`402 Insufficient account funds`, `403 Workspace access denied`,
-  region policy) now rotate to a healthy sibling mid-turn AND demote the
-  account in health checks for 30 minutes — a dead account cannot keep winning
-  the ranking just because it never served anything. Verdicts expire, so a
-  topped-up account heals itself.
+  region policy) rotate to a healthy sibling mid-turn AND demote the account
+  in health checks — a dead account cannot keep winning the ranking just
+  because it never served anything. Every attempt stamps its OWN
+  `x-opencode-org-id`: the gateway answers 402/403 the moment a bearer carries
+  a foreign or missing org, and that pairing failure is reported as
+  *membership/pairing* (403), not as capacity — only the 402 is an exhausted
+  window. A verdict persists at least the reset horizon the gateway stated
+  (else a conservative 30-minute TTL), verdict'd and 100%-used accounts never
+  win selection, a usage poll that reports a window at 100% re-pins every
+  session off that account, and verdicts still expire so a topped-up account
+  heals itself.
 - **Limits.** `omp usage` shows the 5h / weekly / monthly windows, so you can
   watch the monthly one climb like everyone else. Log in with a second account
   (`/login` again — or `omp login opencode-free`) and omp pools and

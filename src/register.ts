@@ -33,7 +33,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build"
 import { streamSimple } from "@oh-my-pi/pi-ai"
 import { harnessFetch } from "./ordered-fetch"
 import type { Api, Model, SimpleStreamOptions, Context, AssistantMessageEventStream } from "@oh-my-pi/pi-ai"
-import { providerOverride, refreshConsoleConfig } from "./console-config"
+import { orgScopedHeaders, providerOverride, refreshConsoleConfig } from "./console-config"
 import { mapRegionGateErrors } from "./region"
 import { writeModelsOverride } from "./models-config"
 import { indexTokenOrg, OpencodeOAuthProvider, orgForToken } from "./opencode-provider"
@@ -215,6 +215,12 @@ function wireStream(providerID: string, identity: HarnessIdentity, consoleBase: 
         } as never)
       : (Object.assign(Object.create(Object.getPrototypeOf(model)), model, {
           api: UPSTREAM_API,
+          // The protocol merges `model.headers` UNDER `StreamOptions.headers`;
+          // a projection-time stamp there would outlive this request's filter
+          // whenever no serving org resolved. The filtered merge below already
+          // folded them in, so the routed copy carries none of its own.
+          headers: undefined,
+          resolveHeaders: undefined,
           ...(existingSettings ? { settings: existingSettings } : {}),
         }) as Model<typeof UPSTREAM_API>)
     return mapRegionGateErrors(
@@ -231,22 +237,22 @@ function wireStream(providerID: string, identity: HarnessIdentity, consoleBase: 
         fetch: harnessFetch,
         // Fingerprint + Console-pushed headers win over anything static; the
         // org header attributes the request to the serving workspace exactly
-        // as the harness's Console-driven provider does. Auth stays with the
-        // pipeline (see authHeader). The org is single-sourced here: every
-        // other `x-opencode-org-id` in the merge (pipeline default, another
-        // account's cached Console snapshot) is dropped.
-        // Mirror the harness exactly: the inference request carries Bearer +
-        // session/UA headers and NO org/workspace header (x-org-id rides only
-        // Console config/websearch/MCP calls in the harness - see
-        // plugin/provider/opencode.ts credentialHeaders). Any org stamp from a
-        // cached Console snapshot is dropped here.
+        // as the harness's Console-driven provider does (capture/golden-
+        // requests.ndjson: every inference carries the pushed
+        // x-opencode-org-id). Auth stays with the pipeline (see authHeader).
+        // The org is single-sourced here: `model.headers` (the RESOLVED
+        // projection layers — these ride the wire under us and carried the
+        // previous account's stamp) and every other `x-opencode-org-id` in the
+        // merge (pipeline default, another account's cached Console snapshot)
+        // are dropped unless they belong to THIS attempt's serving credential.
         headers: withServingOrg(
           {
+            ...model.headers,
             ...streamOptions?.headers,
             ...sessionHeaders(sessionIdentity, identity),
             ...override.headers,
           },
-          undefined,
+          orgId,
         ),
       } as SimpleStreamOptions),
       token,
@@ -274,9 +280,12 @@ function projectModels(models: Model<Api>[], credentials: { orgId?: string }) {
         ...model.headers,
         // The org is NOT stamped here: projection-time credentials outlive the
         // request, and a static org paired with the pool's OTHER token is what
-        // the gateway rejects with "Workspace access denied". wireStream injects
-        // the serving credential's own org per attempt.
-        ...override.headers,
+        // the gateway rejects with "Workspace access denied" — the 17 straight
+        // 403s of 2026-10-16 were this stamp riding model.headers past the
+        // request-time merge. Org-neutral pushed values (endpoint, fingerprint)
+        // still ride; wireStream injects the serving credential's own org per
+        // attempt.
+        ...orgScopedHeaders(override.headers, false),
       },
       resolveHeaders: async () => sessionHeaders(sessionIdentity, DEFAULT_IDENTITY),
     })

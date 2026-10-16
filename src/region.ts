@@ -15,6 +15,7 @@
 // 403 rotation lane makes omp rotate to a healthy sibling mid-turn, and the
 // rewritten message says which knob to turn when there is no sibling.
 
+import { appendFileSync } from "node:fs"
 import type { AssistantMessageEvent, AssistantMessageEventStream } from "@oh-my-pi/pi-ai"
 // Package root, never a `./utils/*` catch-all path: omp's extension loader
 // only rewrites explicit package exports (same rule as the streamSimple import).
@@ -30,10 +31,25 @@ const ROTATION_STATUS = 403
 
 function gateSuffix(value: unknown): string {
   const text = JSON.stringify(value)
+  // The two member verdicts are different failures and must not share one
+  // explanation: "Insufficient account funds" is the account's own window
+  // (capacity), while "Workspace access denied" is a MEMBERSHIP/pairing
+  // failure — historically the signature of a bearer carrying a foreign or
+  // missing org stamp. Calling that "capacity" sent every investigation down
+  // the quota rabbit hole while the stamp was the actual bug. The word
+  // "capacity" stays in the membership note (as its negation) so the message
+  // keeps classifying into the short transient backoff lane.
   if (ACCOUNT_GATE.test(text)) {
+    if (/Insufficient account funds/i.test(text)) {
+      return (
+        " (This is a member verdict, not a bad login: that account cannot serve this request " +
+        "right now (capacity window). omp rotates to a healthy account when the pool has one.)"
+      )
+    }
     return (
-      " (This is a member verdict, not a bad login: that account cannot serve this request " +
-      "right now (capacity window). omp rotates to a healthy account when the pool has one.)"
+      " (This is a member verdict, not a bad login: the serving account is not a member of the " +
+      "attributed workspace — a stamp/pairing problem, not a capacity window. " +
+      "omp rotates to a healthy account when the pool has one.)"
     )
   }
   return (
@@ -64,7 +80,7 @@ function reshape<T>(value: T): T {
 
 const GATE_NEUTRAL: Array<[RegExp, string]> = [
   [/Insufficient account funds/gi, "account member capacity exhausted for this window"],
-  [/Workspace access denied/gi, "workspace capacity rejected this account"],
+  [/Workspace access denied/gi, "workspace membership rejected this account"],
   [/requires\s+Global\s+regions|Privacy settings/gi, "workspace policy blocks this model"],
   [/no funds/gi, "capacity exhausted"],
 ]
@@ -162,9 +178,84 @@ function stripWaitHintsFromError(value: unknown, depth = 0): void {
  * every retry walked back into the same dry account while the host parked on
  * the classifier's quota window).
  */
+/**
+ * The account's own reset horizon carried by a gate response: a duration
+ * (`retryAfterMs`/`waitTimeMs`, `retry-after[-ms]` headers, "retry after …"/
+ * "resets in …" in the text) or an absolute `resetAt`-style field. Read BEFORE
+ * wait hints are stripped — the verdict must outlive exactly the window the
+ * gateway stated, or the account heals into the ranking while still exhausted.
+ */
+function verdictHorizon(carrier: unknown, at: number): number | undefined {
+  const DURATION_KEY = /^(?:retryafter|retryafterms|waittimems|waitms|backoffms)$/
+  const EPOCH_KEY = /^(?:resetat|resetatms|resetsat|resetsatms|resettimes|unblockat|blockeduntil)$/
+  // Compound windows count as written: "resets in 2d 12h" is 2d PLUS 12h.
+  const DURATION_TEXT = /\bretry(?:[_ -]?after| in)?[=: ]+((?:\d+(?:\.\d+)?\s*(?:ms|sec(?:ond)?s?|mins?|minutes?|hrs?|hours?|days?|m|h|d)(?:[ ,]+|$)*)+)/gi
+  const RESET_TEXT = /\bresets? (?:in|at)\s+((?:\d+(?:\.\d+)?\s*(?:ms|sec(?:ond)?s?|mins?|minutes?|hrs?|hours?|days?|m|h|d)(?:[ ,]+|$)*)+)/gi
+  const DURATION_TOKEN = /(\d+(?:\.\d+)?)\s*(ms|sec(?:ond)?s?|mins?|minutes?|hrs?|hours?|days?|m|h|d)?/g
+  const UNIT_MS: Record<string, number> = { ms: 1, s: 1000, sec: 1000, secs: 1000, second: 1000, seconds: 1000,
+    m: 60_000, min: 60_000, mins: 60_000, minute: 60_000, minutes: 60_000,
+    h: 3_600_000, hr: 3_600_000, hrs: 3_600_000, hour: 3_600_000, hours: 3_600_000,
+    d: 86_400_000, day: 86_400_000, days: 86_400_000 }
+  const unitMs = (unit: string | undefined, fallback: number): number => {
+    if (unit === undefined) return fallback
+    const key = unit.toLowerCase()
+    return UNIT_MS[key] ?? UNIT_MS[`${key}s`] ?? fallback
+  }
+  const runMs = (run: string, fallback: number): number => {
+    let total = 0
+    for (const token of run.matchAll(DURATION_TOKEN)) total += Number(token[1]) * unitMs(token[2], fallback)
+    return total
+  }
+  const MAX_HORIZON_MS = 400 * 86_400_000
+  let horizon: number | undefined
+  const offer = (candidate: number | undefined) => {
+    if (candidate === undefined || !Number.isFinite(candidate)) return
+    if (candidate <= at || candidate > at + MAX_HORIZON_MS) return
+    if (horizon === undefined || candidate > horizon) horizon = candidate
+  }
+  const walk = (value: unknown, depth: number): void => {
+    if (value == null || typeof value !== "object" || depth > 4) return
+    if (Array.isArray(value)) {
+      for (const entry of value) walk(entry, depth + 1)
+      return
+    }
+    for (const [rawKey, entry] of Object.entries(value as Record<string, unknown>)) {
+      const key = rawKey.toLowerCase().replace(/[^a-z]/g, "")
+      if (typeof entry === "number") {
+        if (DURATION_KEY.test(key)) offer(at + entry)
+        else if (EPOCH_KEY.test(key)) offer(entry)
+      } else if (typeof entry === "string") {
+        if (key === "retryafterms" || key === "retryafter") offer(at + Number(entry) * (key === "retryafter" ? 1000 : 1))
+        for (const match of entry.matchAll(DURATION_TEXT)) offer(at + runMs(match[1], 1))
+        for (const match of entry.matchAll(RESET_TEXT)) offer(at + runMs(match[1], 1000))
+      } else if (entry instanceof Headers) {
+        // Live Headers (thrown-error shape): `retry-after` is seconds,
+        // `retry-after-ms` is milliseconds — the account's own window hint.
+        entry.forEach((value, name) => {
+          const header = name.toLowerCase()
+          const numeric = Number(value)
+          if (!Number.isFinite(numeric)) return
+          if (header === "retry-after-ms") offer(at + numeric)
+          else if (header === "retry-after") offer(at + numeric * 1000)
+        })
+      } else if (entry !== null && typeof entry === "object") walk(entry, depth + 1)
+    }
+  }
+  walk(carrier, 0)
+  return horizon
+}
+
 function handleGateFailure(carrier: unknown, token?: string, orgId?: string): void {
   const text = JSON.stringify(carrier)
   if (!REGION_GATE.test(text) && !ACCOUNT_GATE.test(text)) return
+  // Horizon first: stripWaitHintsFromError deletes the very fields that state
+  // when the account's window resets.
+  const at = Date.now()
+  const until = verdictHorizon(carrier, at)
+  if (process.env.OMP_GO_REGION_DEBUG)
+    try {
+      appendFileSync(process.env.OMP_GO_REGION_DEBUG, JSON.stringify({ until, carrier: JSON.parse(JSON.stringify(carrier)) }) + "\n")
+    } catch {}
   stripWaitHintsFromError(carrier)
   const key = orgId ?? orgForToken(token) ?? (token ? `token:${token.slice(-8)}` : undefined)
   void repinAfterVerdict(key)
@@ -175,7 +266,8 @@ function handleGateFailure(carrier: unknown, token?: string, orgId?: string): vo
       : /Workspace access denied/i.test(text)
         ? "account is not a member of the attributed workspace"
         : "workspace policy blocks this model (Privacy not Global)",
-    at: Date.now(),
+    at,
+    ...(until === undefined ? {} : { until }),
   }, key)
   neutralizeGateError(carrier)
 }
