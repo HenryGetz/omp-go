@@ -53,8 +53,11 @@ import json, sys
 
 # Pair every toolCall with its toolResult (by toolCallId). A call is BAD when
 #   - its arguments carry __parseError (unparseable / lost-args marker),
-#   - its RESULT failed schema validation ("(was missing)" / "Invalid" /
-#     "Validation failed"), or
+#   - its ERRORED result failed schema validation ("(was missing)" /
+#     "Invalid" / "Validation failed"). Markers only count when isError=true:
+#     host validation failures always arrive errored; a successful result
+#     whose TEXT quotes those words (file reads, script output) is content,
+#     not a schema failure.
 #   - it arrived with EMPTY arguments AND its result errored (empty {} against
 #     an all-optional tool like `wait` that SUCCEEDS is schema-complete).
 calls, bad, bad_results = [], False, []
@@ -95,7 +98,7 @@ for line in open(sys.argv[1]):
             bad = True
             calls.append((name, json.dumps(args, sort_keys=True), "PARSE-ERR"))
             continue
-        if any(m in blob for m in VALIDATION_MARKERS):
+        if is_err and any(m in blob for m in VALIDATION_MARKERS):
             bad = True
             bad_results.append(blob[:160])
             calls.append((name, json.dumps(args, sort_keys=True) if args else "{}", "INVALID"))
