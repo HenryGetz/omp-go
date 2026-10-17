@@ -26,8 +26,9 @@ omp plugin install github:HenryGetz/omp-go
 ```
 
 Restart. Free models work immediately (`/model opencode-free/mimo-v2.6-flash-free`).
-For the Go subscription: `/login` → "OpenCode Console (Go subscription)". A
-browser opens, a code appears, tokens rotate themselves. Revolutionary.
+For the Go subscription: `/login` → pick **OpenCode Go** — the one OpenCode
+entry. A browser opens, a code appears, tokens rotate themselves.
+Revolutionary.
 
 ## Your machines, your egresses
 
@@ -247,8 +248,17 @@ anything else that isn't `PASS` fails the run.
 
 ## What it does
 
-- **Login.** The real device flow, byte-for-byte the one `opencode auth login`
-  uses. opencode-cli client id and all. Sue me.
+- **Login.** ONE entry, named the same everywhere: the picker row, the dialog
+  title, `Logging in to …`, `Successfully logged in to … as <email> (<org>)`
+  all say **OpenCode Go** — the id *is* the display name, and the three
+  confusing legacy rows (builtin paste-key "OpenCode Go"/"OpenCode Zen",
+  "OpenCode Console (shared account)", "OpenCode Console (Go subscription)")
+  are retired out of the picker, along with every api-key prompt: OpenCode
+  stopped issuing keys, so there is nothing to paste. The flow itself is the
+  real device flow, byte-for-byte the one `opencode auth login` uses —
+  opencode-cli client id and all. One sign-in stores the grant under
+  `opencode-go`, which both lanes read: the Go lane authenticated, the free
+  lane on its keyless `public` fallback. Sue me.
 - **Free tier.** The same models the harness enables without a key: zero-cost
   catalog entries only (the harness's own rule — `cost.input > 0` models are
   disabled when keyless), deprecated entries hidden. The gateway enforces it:
@@ -270,7 +280,7 @@ anything else that isn't `PASS` fails the run.
   heals itself.
 - **Limits.** `omp usage` shows the 5h / weekly / monthly windows, so you can
   watch the monthly one climb like everyone else. Log in with a second account
-  (`/login` again — or `omp login opencode-free`) and omp pools and
+  (`/login` again — or `omp login "OpenCode Go"`) and omp pools and
   load-balances across both, ranking by remaining quota. Two accounts, double
   the cope. Combine with three egresses and you're basically a small
   datacenter of one.
@@ -367,8 +377,11 @@ shouts "wake" when a hidden model recovers upstream.
   machines, not an anonymizer — everyone's still you.
 - Quota and region rules are **per workspace**. If a model says it "requires
   Global regions", that workspace's Privacy setting is not Global — fix it in
-  the Console or `/logout` that account. Pooling routes around it when a
-  healthy sibling exists.
+  the Console or `/logout OpenCode Go` (the provider id the login entry
+  carries — the bare `/logout` picker only lists rows whose id matches a
+  stored credential directly, and every OpenCode credential is stored under
+  `opencode-go`, which the retirement no longer lists) to drop that account.
+  Pooling routes around it when a healthy sibling exists.
 - Usage route has no golden trace; the harness never calls it. Sued for honesty.
 - Limit windows are account-wide. Share with yourself responsibly.
 - `ln -s ~/.bun/install/global/node_modules node_modules` if you want

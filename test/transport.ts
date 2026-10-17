@@ -203,9 +203,17 @@ assert.deepEqual(
 // tail misparsed. Every truncated frame now errors; clean EOF-framed bodies
 // (the connection's end is the frame) still complete.
 {
+  // `close()` destroys the accepted sockets before closing the server:
+  // server.close() alone waits for connections that were only half-closed
+  // (and the readers never destroy their client end), which left every
+  // socket pair open — the process survived the OK line and the test chain
+  // hung here forever even though every assertion had passed.
   const serve = async (respond: (socket: net.Socket) => void) => {
+    const accepted = new Set<net.Socket>()
     const server = net.createServer((socket) => {
+      accepted.add(socket)
       socket.on("error", () => undefined)
+      socket.on("close", () => accepted.delete(socket))
       respond(socket)
     })
     await new Promise<void>((resolve, reject) => {
@@ -214,7 +222,11 @@ assert.deepEqual(
     })
     const address = server.address()
     const port = typeof address === "object" && address !== null ? address.port : 0
-    return { port, server }
+    const close = () => {
+      for (const socket of accepted) socket.destroy()
+      server.close()
+    }
+    return { port, close }
   }
   const rawGet = async (port: number) => {
     const socket = net.connect(port, "127.0.0.1")
@@ -234,7 +246,7 @@ assert.deepEqual(
 
   // Dropped mid-content-length body.
   {
-    const { port, server } = await serve((socket) => {
+    const { port, close } = await serve((socket) => {
       socket.write("HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\n")
       socket.write("0123456789")
       socket.end()
@@ -248,13 +260,13 @@ assert.deepEqual(
         "a truncated content-length body must error, not resolve short",
       )
     } finally {
-      server.close()
+      close()
     }
   }
 
   // Dropped mid-chunk body.
   {
-    const { port, server } = await serve((socket) => {
+    const { port, close } = await serve((socket) => {
       socket.write("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
       socket.write("a\r\n")
       socket.write("partial")
@@ -268,13 +280,13 @@ assert.deepEqual(
         "a truncated chunk body must error, not misframe the tail",
       )
     } finally {
-      server.close()
+      close()
     }
   }
 
   // Dropped mid-head.
   {
-    const { port, server } = await serve((socket) => {
+    const { port, close } = await serve((socket) => {
       socket.write("HTTP/1.1 200 OK\r\nConte")
       socket.end()
     })
@@ -285,14 +297,14 @@ assert.deepEqual(
         "a dropped head must error",
       )
     } finally {
-      server.close()
+      close()
     }
   }
 
   // EOF-framed body (no length header): the connection's end is the frame —
   // short reads are the normal case and the body completes.
   {
-    const { port, server } = await serve((socket) => {
+    const { port, close } = await serve((socket) => {
       socket.write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
       socket.write("data: hi\n\n")
       socket.end()
@@ -301,13 +313,13 @@ assert.deepEqual(
       const response = await rawGet(port)
       assert.equal((await readAllBody(response.body)).toString(), "data: hi\n\n", "an EOF-framed body completes")
     } finally {
-      server.close()
+      close()
     }
   }
 
   // A complete chunked stream (terminal chunk, then close) still round-trips.
   {
-    const { port, server } = await serve((socket) => {
+    const { port, close } = await serve((socket) => {
       socket.write("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
       socket.write("5\r\nhello\r\n")
       socket.write("3\r\n---\r\n")
@@ -318,7 +330,7 @@ assert.deepEqual(
       const response = await rawGet(port)
       assert.equal((await readAllBody(response.body)).toString(), "hello---", "a complete chunked body round-trips")
     } finally {
-      server.close()
+      close()
     }
   }
 }

@@ -297,11 +297,18 @@ async function main(): Promise<number> {
     if (mimo && mimo.reasoning !== true) localProblems.push("mimo reasoning flag lost")
     if (!config?.usage || !config?.fetchDynamicModels)
       localProblems.push("config missing usage/fetchDynamicModels")
-    const listed = getOAuthProviders().find((entry) => entry.id === "opencode-free")
-    if (!listed) localProblems.push("auth-broker listing missing 'opencode-free' login")
+    // The single login entry: exactly one opencode-ish row, named "OpenCode
+    // Go", routing its grant to both lanes. The legacy rows (builtin
+    // paste-key, opencode-free, the go lane's own) are retired by id.
+    const opencodeRows = getOAuthProviders().filter((entry) => /opencode/i.test(`${entry.name} ${entry.id}`))
+    if (opencodeRows.length !== 1)
+      localProblems.push(`expected one OpenCode login row, got ${opencodeRows.map((e) => `${e.name} (${e.id})`).join(", ")}`)
+    const listed = opencodeRows[0]
+    if (listed && listed.name !== "OpenCode Go")
+      localProblems.push(`login row name ${listed.name} != OpenCode Go`)
     if (listed && listed.storeCredentialsAs !== "opencode-go")
       localProblems.push(`login stores as ${listed.storeCredentialsAs} != opencode-go`)
-    const freeOauth = freeConfig?.oauth as { storeCredentialsAs?: string } | undefined
+    if (freeConfig?.oauth) localProblems.push("opencode-free must not register a login row")
     if (!freeConfig) localProblems.push("registerProvider got no opencode-free config")
     if (freeConfig && freeConfig.apiKey !== "public")
       localProblems.push(`opencode-free apiKey ${freeConfig.apiKey} != public (keyless free tier)`)
@@ -315,8 +322,6 @@ async function main(): Promise<number> {
       if (tiers.some((tier) => Number(tier?.input ?? 0) > 0))
         localProblems.push(`opencode-free includes paid model ${id} (harness free tier is zero-cost only)`)
     }
-    if (freeOauth && freeOauth.storeCredentialsAs !== "opencode-go")
-      localProblems.push(`free oauth storeCredentialsAs ${freeOauth.storeCredentialsAs} != opencode-go`)
 
     const report = config?.usage
       ? await config.usage.fetchUsage(

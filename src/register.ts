@@ -32,6 +32,7 @@ import type {
 // '@oh-my-pi/pi-ai'"). The root re-exports `streamSimple` (`export * from "./stream"`).
 import { buildModel } from "@oh-my-pi/pi-catalog/build"
 import { streamSimple } from "@oh-my-pi/pi-ai"
+import { getOAuthProvider, getOAuthProviders } from "@oh-my-pi/pi-ai/oauth"
 import { harnessFetch } from "./ordered-fetch"
 import type { Api, Model, SimpleStreamOptions, Context, AssistantMessageEventStream } from "@oh-my-pi/pi-ai"
 import { orgScopedHeaders, providerOverride, refreshConsoleConfig } from "./console-config"
@@ -86,10 +87,22 @@ export function isOurWireProvider(providerID: string | undefined): boolean {
   return providerID === OPENCODE_GO_PROVIDER || providerID === FREE_PROVIDER || providerID === "opencode-zen"
 }
 
-// The Console device-flow login is filed by the `opencode` registration's
-// `config.oauth` (id = provider name; pi-catalog has no built-in `opencode`
-// login to shadow it), with `storeCredentialsAs` routing the grant under
-// `opencode-go` so both model providers pick it up.
+// ONE /login entry for everything OpenCode.
+//
+// The Console device-flow login is filed by a login-only registration whose
+// id AND display name are `OpenCode Go`: the host prints the raw provider id
+// in `Logging in to …` / `Successfully logged in to …` and the dialog title
+// is `name ?? id`, so the id doubles as the label — one name everywhere. The
+// id is deliberately NOT a pi-catalog id: dispatch is builtin-first
+// (`getProviderDefinition ?? getOAuthProvider`), so a built-in id would run
+// pi-catalog's paste-a-key flow instead (OpenCode Go has no API keys
+// anymore), and `storeCredentialsAs` routes the grant under `opencode-go` so
+// both model providers pick it up.
+//
+// The three legacy rows (builtin "OpenCode Go"/"OpenCode Zen" paste-key
+// logins + the go lane's own registration row) leave the picker through
+// retireLegacyLoginRows() below.
+export const LOGIN_PROVIDER_ID = "OpenCode Go"
 const CREDENTIALS_ID = "opencode-go"
 
 /** Test hooks: point the Console and gateways at a stub without touching code. */
@@ -338,6 +351,76 @@ function projectModels(models: Model<Api>[], credentials: { orgId?: string }) {
   })
 }
 
+/**
+ * Retire the three legacy OpenCode rows from the /login picker, leaving only
+ * LOGIN_PROVIDER_ID.
+ *
+ * The mechanism, and why it is the simplest one that meets the criteria:
+ *
+ * - Same-id shadowing does NOT win. pi-ai's `getOAuthProviders()` is
+ *   `[...builtins, ...customs]` with no dedupe (both an id-`opencode-go`
+ *   builtin and the go lane's registration list today), and login dispatch is
+ *   builtin-first (`getProviderDefinition ?? getOAuthProvider`), which is why
+ *   selecting that row ran pi-catalog's paste-a-key flow instead of the
+ *   device flow.
+ * - The picker's only hide filter is `disabled.has(id) || disabled.has
+ *   (storeCredentialsAs)` over the user's `disabledProviders`. Putting
+ *   `opencode-go` there hides the builtin row but also kills the lane's model
+ *   availability and this entry (its storeCredentialsAs is `opencode-go`), so
+ *   the settings route cannot express "exactly one row".
+ * - Builtins are snapshotted at pi-ai module init (`provider.login &&
+ *   showInLoginList !== false`), so nothing unregisters them.
+ *
+ * What remains is field mutation on the host's own row objects: this
+ * extension shares the host module instance (the loader rewrites explicit
+ * package exports such as `@oh-my-pi/pi-ai/oauth` to the bundled copy — the
+ * same objects /login reads). Renaming `id` + `name` off the `opencode`
+ * search text hides a row from the picker's `getProviderSearchText`
+ * (`${name} ${id} …`) without touching any functional key:
+ *
+ * - builtin rows: display fields only; their paste-key flows retire with them.
+ * - the go lane's registration: the custom map is keyed by the id it was
+ *   REGISTERED under, not the mutable `id` field, so `getOAuthProvider(
+ *   "opencode-go")` still serves refresh/getApiKey and
+ *   `getOAuthCredentialProvider("opencode-go")` falls back to the raw id for
+ *   credential lookups — routing and `/logout opencode-go` stay correct.
+ *   (Its listed row retires: selection would miss the mutated id; the working
+ *   flow is LOGIN_PROVIDER_ID's.)
+ *
+ * The host QUEUES `pi.registerProvider` during extension loading
+ * (`pendingProviderRegistrations`) and flushes it at session initialization,
+ * where the spread re-stores the go lane's entry — resetting its mutable `id`
+ * — so the retirement also runs from the session_start/session_switch
+ * handlers (after each flush). Every pass finds rows by their ORIGINAL ids,
+ * so re-runs are no-op on rows already retired.
+ */
+function retireLegacyLoginRows(): void {
+  const retired = new Map<string, { id: string; name: string }>([
+    // pi-catalog's builtin paste-a-key rows: OpenCode ships no API keys, so
+    // both flows are dead ends (the user-visible problem this replaces).
+    ["opencode-go", { id: "go-api-key-login", name: "Go subscription (API key)" }],
+    ["opencode-zen", { id: "zen-api-key-login", name: "Zen (API key)" }],
+  ])
+  for (const row of getOAuthProviders()) {
+    const rename = retired.get(row.id)
+    if (!rename) continue
+    // Builtins are the shared objects getOAuthProviders() spreads; a custom
+    // wrap is rebuilt per call, so mutating it is a harmless no-op (the
+    // stored entry is retired through its key below).
+    ;(row as { id: string }).id = rename.id
+    ;(row as { name: string }).name = rename.name
+  }
+  const goLaneRegistration = getOAuthProvider(OPENCODE_GO_PROVIDER) as
+    | { id: string; name: string }
+    | undefined
+  if (goLaneRegistration) {
+    // Readonly on the interface only; the mutable field is what the row wraps
+    // read on every getOAuthProviders() call (see the doc comment).
+    goLaneRegistration.name = "Go subscription (retired login)"
+    goLaneRegistration.id = "go-subscription-login"
+  }
+}
+
 export function registerOpencodeGo(
   pi: ExtensionAPI,
   options: { identity?: HarnessIdentity } = {},
@@ -347,6 +430,11 @@ export function registerOpencodeGo(
   const goBase = process.env[GO_BASE_ENV] ?? ZEN_GO_BASE
   const freeBase = process.env[FREE_BASE_ENV] ?? ZEN_BASE
   const oauth = new OpencodeOAuthProvider({ identity, server: consoleBase })
+  // One bound device flow for every registration below (the test surface
+  // asserts every OpenCode oauth is this handler, never an api-key prompt).
+  const deviceLogin = oauth.login.bind(oauth)
+  const deviceRefresh = oauth.refreshToken.bind(oauth)
+  const deviceGetApiKey = oauth.getApiKey.bind(oauth)
   const streamSimpleFor = (providerID: string) => wireStream(providerID, identity, consoleBase)
 
   const goConfig: ProviderConfig = {
@@ -356,15 +444,21 @@ export function registerOpencodeGo(
     authHeader: true,
     headers: { "user-agent": `opencode/${identity.channel}/${identity.version}/${identity.name}` },
     streamSimple: streamSimpleFor(OPENCODE_GO_PROVIDER),
-    // `oauth` marks the provider OAuth-native: a credential saved by /login
-    // wins and is the only key source — an `apiKey` fallback here would let a
-    // stale OPENCODE_API_KEY in the shell hijack the chat path over the login
-    // (the host validation accepts oauth alone).
+    // This block is NOT a login entry — retireLegacyLoginRows() renames the
+    // row it lists out of the /login search. What the registration itself must
+    // keep providing, keyed by the `opencode-go` provider name the custom map
+    // stores under (the map key, unlike the mutable `id` field):
+    //   - validation: models need `apiKey` or `oauth`, and an apiKey here would
+    //     override stored login credentials on the chat path;
+    //   - refresh/getApiKey for the grant stored under `opencode-go`
+    //     (pi-ai's refresh pipeline resolves custom entries by provider id);
+    //   - `modifyModels` projects the credential-aware catalog (api + pushed
+    //     headers) for every OpenCode wire lane while creds live here.
     oauth: {
-      name: "OpenCode Console (Go subscription)",
-      login: oauth.login.bind(oauth),
-      refreshToken: oauth.refreshToken.bind(oauth),
-      getApiKey: oauth.getApiKey.bind(oauth),
+      name: "Go subscription (retired login)",
+      login: deviceLogin,
+      refreshToken: deviceRefresh,
+      getApiKey: deviceGetApiKey,
       modifyModels: projectModels,
     },
     usage: opencodeGoUsageProvider({ session: sessionIdentity, identity }),
@@ -372,10 +466,15 @@ export function registerOpencodeGo(
     fetchDynamicModels: () => fetchCatalogModels({ session: sessionIdentity, identity }),
   }
 
-  // OpenCode's free tier: same login, same fingerprint, free models only.
-  // `apiKey: "public"` is the harness's own free-tier fallback (OpencodePlugin
-  // sets it when no credential is present); a /login credential takes
-  // precedence and is what the harness sends when connected.
+  // OpenCode's free tier: same fingerprint, free models only, keyless. NO
+  // `oauth` block: its login row was the confusing "OpenCode Console (shared
+  // account)" entry, and the lane never resolves oauth credentials itself —
+  // grants are stored under CREDENTIALS_ID (the go lane reads them from
+  // there) while this lane rides `apiKey: "public"`, the harness's own
+  // free-tier fallback (OpencodePlugin sets it when no credential is
+  // present). Without oauth the key installs as the provider's config key,
+  // which is the same value either way: nothing is ever stored under
+  // `opencode-free` for it to outrank.
   const freeConfig: ProviderConfig = {
     baseUrl: freeBase,
     api: WIRE_API,
@@ -383,16 +482,6 @@ export function registerOpencodeGo(
     headers: { "user-agent": `opencode/${identity.channel}/${identity.version}/${identity.name}` },
     streamSimple: streamSimpleFor(FREE_PROVIDER),
     apiKey: "public",
-    // `storeCredentialsAs` is kept by the host's registration spread; the
-    // published ProviderConfig.oauth type predates the field.
-    oauth: {
-      name: "OpenCode Console (shared account)",
-      storeCredentialsAs: CREDENTIALS_ID,
-      login: oauth.login.bind(oauth),
-      refreshToken: oauth.refreshToken.bind(oauth),
-      getApiKey: oauth.getApiKey.bind(oauth),
-      modifyModels: projectModels,
-    } as ProviderConfig["oauth"] & { storeCredentialsAs: string },
     models: freeModels(),
     fetchDynamicModels: () => fetchFreeModels({ session: sessionIdentity, identity }),
   }
@@ -404,6 +493,23 @@ export function registerOpencodeGo(
   writeModelsOverride({ identity })
   pi.registerProvider(OPENCODE_GO_PROVIDER, goConfig)
   pi.registerProvider(FREE_PROVIDER, freeConfig)
+  // The single /login entry — after the lane registrations so every legacy row
+  // it supersedes exists before retirement. Login-only: no models, no baseUrl
+  // (the host validation accepts an oauth-only registration), so nothing ever
+  // sends a request as this id; `apiKey: "public"` is the picker badge
+  // fallback mirroring the free lane (credentials live under CREDENTIALS_ID,
+  // not this id, so keys.source/validateAuth resolve the config source).
+  pi.registerProvider(LOGIN_PROVIDER_ID, {
+    apiKey: "public",
+    oauth: {
+      name: LOGIN_PROVIDER_ID,
+      storeCredentialsAs: CREDENTIALS_ID,
+      login: deviceLogin,
+      refreshToken: deviceRefresh,
+      getApiKey: deviceGetApiKey,
+    } as ProviderConfig["oauth"] & { storeCredentialsAs: string },
+  })
+  retireLegacyLoginRows()
   // Wrappers register unconditionally ONCE (defaultInactive, and the harness's
   // lowercase names do not collide with omp's capitalized built-ins); the
   // free-lane ACTIVATION below is what turns them on. The tool-mirror rewrite
@@ -434,8 +540,16 @@ export function registerOpencodeGo(
   // be fully registered AND active before the agent's first tool call, or the
   // host answers the model's `write`/`shell` with "Tool ... not found".
   pi.on("session_start", async (_event, ctx) => {
+    // The queued provider registrations flushed at session init (re-storing
+    // the go lane's entry with its original id) — retire the rows again.
+    retireLegacyLoginRows()
     rosterRegistry ??= ctx.modelRegistry
     await ensureHarnessTools(ctx)
+  })
+  // Session switches can flush registrations again in the same process; the
+  // pass is find-by-original-id, so an already-retired surface no-ops.
+  pi.on("session_switch", () => {
+    retireLegacyLoginRows()
   })
   pi.on("before_agent_start", async (_event, ctx) => {
     await ensureHarnessTools(ctx)
