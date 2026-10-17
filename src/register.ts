@@ -510,27 +510,40 @@ export function registerOpencodeGo(
     } as ProviderConfig["oauth"] & { storeCredentialsAs: string },
   })
   retireLegacyLoginRows()
-  // Wrappers register unconditionally ONCE (defaultInactive, and the harness's
-  // lowercase names do not collide with omp's capitalized built-ins); the
-  // free-lane ACTIVATION below is what turns them on. The tool-mirror rewrite
-  // (src/tool-mirror.ts) swaps the request's `tools` array for the harness's
-  // fingerprinted 12 — the wrappers carry those exact schemas and the real
-  // behaviour — and the Go lane's traffic stays untouched.
-  registerCollidingHarnessTools(pi)
+  // The seven harness-only wrappers (shell, subagent, execute, websearch,
+  // webfetch, question, skill) share no name with an omp built-in, so
+  // registering them here is inert until the free lane activates them.
   registerHarnessTools(pi)
+
+  // The five COLLIDING wrappers (read, edit, glob, grep, write) are a different
+  // story: registering a same-named tool REPLACES the built-in in the host
+  // registry whether or not the wrapper ends up active. Registering them here
+  // therefore deletes `read`/`write`/`edit`/`glob`/`grep` from EVERY lane, the
+  // Go lane included. That is not cosmetic — omp allocates its `xd://` device
+  // layer only when the session holds a `write` tool
+  // (`xdevEnabled = xdevRequested && tools.some(t => t.name === "write")`), so
+  // losing it silently ships every MCP tool schema top-level on every request.
+  // Register them lazily, on the free lane only, immediately before activation.
+  let collidingRegistered = false
+  const ensureCollidingHarnessTools = (): void => {
+    if (collidingRegistered) return
+    registerCollidingHarnessTools(pi)
+    collidingRegistered = true
+  }
 
   const ensureHarnessTools = async (ctx: { model?: Model<Api> }): Promise<boolean> => {
     const provider = ctx.model?.provider
     if (provider !== FREE_PROVIDER) return false
     // The colliding wrappers re-register omp's read/edit/glob/grep/write, so
-    // this runs only on a free-lane session — the Go lane keeps the built-ins.
-    // Registration happens at plugin setup now; only activation is gated.
+    // registration is confined to this free-lane path — every other lane keeps
+    // the built-ins, and with them the xd:// device layer.
     // includeColliding: the five colliding wrappers replace omp's built-ins,
     // so the active set must be rebuilt (not merely extended) or their calls
     // resolve to stale entries ("Tool read/write not found").
     // The boolean is the rewrite licence: true only when the harness surface
     // RESOLVES (freshly activated or already active).
     try {
+      ensureCollidingHarnessTools()
       return await activateHarnessTools(pi, provider, true)
     } catch {
       return false
