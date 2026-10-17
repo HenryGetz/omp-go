@@ -22,6 +22,7 @@ import { registerCustomApi } from "@oh-my-pi/pi-ai/api-registry"
 import { registerOAuthProvider, getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth"
 import { OpencodeOAuthProvider } from "../src/opencode-provider"
 import { registerOpencodeGo } from "../src/register"
+import { deadModels } from "../src/dead-models"
 import { providerOverride } from "../src/console-config"
 import { fetchConsoleConfig, opencodeChatCompletion, opencodeChatCompletion as freeChat, type SessionIdentity } from "../src/wire"
 
@@ -281,9 +282,13 @@ async function main(): Promise<number> {
     const catalogJson = JSON.parse(
       readFileSync(new URL("../src/models-catalog.json", import.meta.url), "utf8"),
     ) as { models: Record<string, { status?: string }> }
-    const liveCount = Object.values(catalogJson.models).filter((m) => m.status !== "deprecated").length
+    // `catalogModels()` also filters the runtime-learned dead set
+    // (src/dead-models.ts); derive the expectation through the same set so a
+    // retirement learned on this machine is expected, not a regression.
+    const dead = deadModels()
+    const liveCount = Object.entries(catalogJson.models).filter(([id, m]) => m.status !== "deprecated" && !dead.has(id)).length
     if (!config?.models || config.models.length !== liveCount)
-      localProblems.push(`catalog models ${config?.models?.length} != live count ${liveCount} (deprecated filtered)`)
+      localProblems.push(`catalog models ${config?.models?.length} != live count ${liveCount} (deprecated/dead filtered)`)
     if (!mimo) localProblems.push("mimo-v2.6-pro missing from catalog")
     if (mimo && (mimo.contextWindow !== 1048576 || mimo.maxTokens !== 131072))
       localProblems.push(`mimo limits ${mimo.contextWindow}/${mimo.maxTokens} != 1048576/131072`)

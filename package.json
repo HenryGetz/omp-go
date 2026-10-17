@@ -1,6 +1,6 @@
 {
   "name": "omp-go",
-  "version": "1.3.18",
+  "version": "1.3.19",
   "description": "OpenCode for Oh My Pi: the Go subscription and the keyless free tier (10 verified models, both wire protocols) with cache-first account routing and multi-machine egress — wire-identical to the opencode harness.",
   "type": "module",
   "main": "./src/index.ts",
@@ -28,7 +28,7 @@
     "free-tier"
   ],
   "scripts": {
-    "test": "bun test/parity.ts && bun test/transport.ts && bun test/proxy.ts && bun test/traffic.ts && bun test/free-usage.ts && bun test/region.ts && bun test/rotation.ts && bun test/tool-mirror.ts && bun test/sse-normalize.ts && bun test/future-tools.ts",
+    "test": "bun test/parity.ts && bun test/transport.ts && bun test/proxy.ts && bun test/traffic.ts && bun test/free-usage.ts && bun test/dead-models.ts && bun test/region.ts && bun test/rotation.ts && bun test/tool-mirror.ts && bun test/sse-normalize.ts && bun test/future-tools.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

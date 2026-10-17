@@ -116,6 +116,44 @@ its siblings serving — and the moment one trips, the `429`'s own `retry-after`
 is recorded and the report says how long is left. `/freeusage mimo` narrows the
 rows to a substring of the model id.
 
+## Retired models heal themselves
+
+The free/Go rosters rotate upstream (three roster rotations in two days; once:
+`muse-spark-1.3-contributor-free` was still being offered after upstream had
+already retired it). The embedded catalog snapshot and the host's 24h model
+discovery cache both lag behind those rotations, so the plugin learns
+retirements from the gateway itself:
+
+- **Deprecation failures mark models dead at runtime.** Any request failing
+  with HTTP `410`, the machine code `type=ModelDeprecated`, or the prose
+  "has been deprecated" marks that model dead in one shared set
+  (`src/dead-models.ts`) that every roster surface derives from: the
+  provider's model list, the dynamic `fetchDynamicModels` refresh results,
+  and the `/freeusage` row set. A plain 404 — or a 410 without deprecation
+  wording — is a different failure and never hides anything.
+- **The mark persists** in `~/.omp/agent/omp-go-dead-models.json` (same shape
+  and locking as the other `omp-go-*.json` sidecars), so every later omp
+  process — every TUI, every `omp run`, every subagent — starts with the
+  retirement already learned. A few hand-verified models remain in the seed
+  set; manual list edits are never needed again.
+- **The roster re-evaluates immediately.** The deprecation failure nudges the
+  host's model registry through `refreshDiscoverableProviders(..., "online")`,
+  which bypasses the 24h discovery cache (the "online" strategy always
+  fetches): the fresh, dead-filtered roster replaces the provider's rows
+  within seconds.
+- **The error stays loud and specific.** The failing turn never silently swaps
+  your session's model. It says the model is RETIRED UPSTREAM, keeps the
+  gateway's `type=ModelDeprecated` classification visible, and names live
+  alternatives plus `/model` (`/freeusage` on the free lane) to switch.
+
+Residual lag, honestly: the heal is a fire-and-forget network fetch. When it
+fails (offline gateway, flaky network), the host's cached rows may keep
+offering the retired model until its next successful refresh — but every
+attempt still fails loudly, still teaches the dead set to every surface this
+process derives, and the persisted mark covers all later processes. An
+already-running omp process picks the mark up at its next roster derivation
+and heals its own registry on its first deprecation failure.
+
 ## Account routing (multi-account, cache-first)
 
 Prompt caching is per account: every request that lands where the prompt-cache

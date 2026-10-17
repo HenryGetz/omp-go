@@ -22,6 +22,7 @@
 import { appendFileSync } from "node:fs"
 import type {
   ExtensionAPI,
+  ExtensionContext,
   ProviderConfig,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types"
 // Import from the package root, never `@oh-my-pi/pi-ai/stream`. omp's extension
@@ -37,6 +38,7 @@ import { orgScopedHeaders, providerOverride, refreshConsoleConfig } from "./cons
 import { mapRegionGateErrors } from "./region"
 import { writeModelsOverride } from "./models-config"
 import { indexTokenOrg, OpencodeOAuthProvider, orgForToken } from "./opencode-provider"
+import { mapDeprecationErrors } from "./dead-models"
 import { catalogModels, fetchCatalogModels, fetchFreeModels, freeModels, usesResponsesAPI } from "./models"
 import { OPENCODE_GO_PROVIDER, opencodeGoUsageProvider } from "./usage"
 import {
@@ -133,6 +135,40 @@ export function withServingOrg(
   return merged
 }
 
+// The host's model-registry handle, captured from the first event context that
+// carries one (`session_start` always runs before a turn; `before_provider_request`
+// backs it up). It is the roster-heal door: a deprecation failure must move the
+// retired model out of the PICKER immediately, not at the host's next
+// discovery refresh.
+let rosterRegistry: ExtensionContext["modelRegistry"] | undefined
+
+const HEAL_THROTTLE_MS = 30_000
+const lastHealAt = new Map<string, number>()
+
+/**
+ * Roster heal after a deprecation mark. `refreshDiscoverableProviders` drives
+ * this plugin's own `fetchDynamicModels` managers directly, and the "online"
+ * strategy bypasses the host's 24h discovery cache (pi-catalog's
+ * shouldFetchRemoteSources always fetches for "online"): the fresh roster —
+ * already filtered through the dead set — replaces the provider's model rows,
+ * so the retired model leaves every picker surface this process serves.
+ * Fire-and-forget and best-effort: the failing turn stays loud and specific;
+ * on fetch failure the host keeps its cached rows until the next successful
+ * refresh, while every surface omp derives still filters the dead set.
+ */
+function healRoster(providerID: string): void {
+  const registry = rosterRegistry
+  if (!registry) return
+  const now = Date.now()
+  // A user hammering the dead model must not turn each turn into a catalog
+  // fetch; one heal per provider per window is enough to replace the rows.
+  if (now - (lastHealAt.get(providerID) ?? 0) < HEAL_THROTTLE_MS) return
+  lastHealAt.set(providerID, now)
+  void registry.refreshDiscoverableProviders([providerID], "online").catch(() => {
+    // Best-effort by design (see the docstring).
+  })
+}
+
 /** Per-request fingerprint + Console-config merge, shared by both providers. */
 function wireStream(providerID: string, identity: HarnessIdentity, consoleBase: string | undefined) {
   return (model: Model<Api>, context: Context, streamOptions?: SimpleStreamOptions): AssistantMessageEventStream => {
@@ -224,41 +260,50 @@ function wireStream(providerID: string, identity: HarnessIdentity, consoleBase: 
           resolveHeaders: undefined,
           ...(existingSettings ? { settings: existingSettings } : {}),
         }) as Model<typeof UPSTREAM_API>)
-    return mapRegionGateErrors(
-      streamSimple(routed as Model<typeof UPSTREAM_API>, context as Context, {
-        ...streamOptions,
-        // Harness `responsesEffort` shape: summary "auto" rides every engaged
-        // reasoning request on the Responses protocol.
-        ...(viaResponses && !(streamOptions && "reasoningSummary" in streamOptions)
-          ? { reasoningSummary: "auto" as const }
-          : {}),
-        // Harness-order transport (src/ordered-fetch.ts): the free-tier gateway
-        // validates session-id encoding, and the harness's exact wire order keeps
-        // the traffic byte-faithful on every lane.
-        fetch: harnessFetch,
-        // Fingerprint + Console-pushed headers win over anything static; the
-        // org header attributes the request to the serving workspace exactly
-        // as the harness's Console-driven provider does (capture/golden-
-        // requests.ndjson: every inference carries the pushed
-        // x-opencode-org-id). Auth stays with the pipeline (see authHeader).
-        // The org is single-sourced here: `model.headers` (the RESOLVED
-        // projection layers — these ride the wire under us and carried the
-        // previous account's stamp) and every other `x-opencode-org-id` in the
-        // merge (pipeline default, another account's cached Console snapshot)
-        // are dropped unless they belong to THIS attempt's serving credential.
-        headers: withServingOrg(
-          {
-            ...model.headers,
-            ...streamOptions?.headers,
-            ...sessionHeaders(sessionIdentity, identity),
-            ...override.headers,
-          },
-          orgId,
-        ),
-      } as SimpleStreamOptions),
-      token,
-      orgId,
-    )
+    const source = streamSimple(routed as Model<typeof UPSTREAM_API>, context as Context, {
+      ...streamOptions,
+      // Harness `responsesEffort` shape: summary "auto" rides every engaged
+      // reasoning request on the Responses protocol.
+      ...(viaResponses && !(streamOptions && "reasoningSummary" in streamOptions)
+        ? { reasoningSummary: "auto" as const }
+        : {}),
+      // Harness-order transport (src/ordered-fetch.ts): the free-tier gateway
+      // validates session-id encoding, and the harness's exact wire order keeps
+      // the traffic byte-faithful on every lane.
+      fetch: harnessFetch,
+      // Fingerprint + Console-pushed headers win over anything static; the
+      // org header attributes the request to the serving workspace exactly
+      // as the harness's Console-driven provider does (capture/golden-
+      // requests.ndjson: every inference carries the pushed
+      // x-opencode-org-id). Auth stays with the pipeline (see authHeader).
+      // The org is single-sourced here: `model.headers` (the RESOLVED
+      // projection layers — these ride the wire under us and carried the
+      // previous account's stamp) and every other `x-opencode-org-id` in the
+      // merge (pipeline default, another account's cached Console snapshot)
+      // are dropped unless they belong to THIS attempt's serving credential.
+      headers: withServingOrg(
+        {
+          ...model.headers,
+          ...streamOptions?.headers,
+          ...sessionHeaders(sessionIdentity, identity),
+          ...override.headers,
+        },
+        orgId,
+      ),
+    } as SimpleStreamOptions)
+    // Outermost wrapper: a deprecation failure marks the model dead at runtime
+    // (src/dead-models.ts) and rewrites the user-visible error to say so —
+    // outside mapRegionGateErrors so it sees exactly what the caller gets,
+    // while the account-verdict machinery stays untouched inside.
+    const lane = model.provider ?? providerID
+    return mapDeprecationErrors(mapRegionGateErrors(source, token, orgId), {
+      modelId: model.id,
+      // Read lazily AFTER the mark lands, so the roster in the note is already
+      // clean of the retired model.
+      alternatives: () => (lane === FREE_PROVIDER ? freeModels() : catalogModels()).map((entry) => entry.id),
+      freeUsageHint: lane === FREE_PROVIDER,
+      onRetired: () => healRoster(lane),
+    })
   }
 }
 
@@ -389,6 +434,7 @@ export function registerOpencodeGo(
   // be fully registered AND active before the agent's first tool call, or the
   // host answers the model's `write`/`shell` with "Tool ... not found".
   pi.on("session_start", async (_event, ctx) => {
+    rosterRegistry ??= ctx.modelRegistry
     await ensureHarnessTools(ctx)
   })
   pi.on("before_agent_start", async (_event, ctx) => {
@@ -400,6 +446,7 @@ export function registerOpencodeGo(
   // in its tool list while the host registry still lacked it ("Tool shell not
   // found"). Ordering is now guaranteed: active tools before the request.
   pi.on("before_provider_request", async (event, ctx) => {
+    rosterRegistry ??= ctx.modelRegistry
     if (ctx.model?.provider !== FREE_PROVIDER) return undefined
     const activated = await ensureHarnessTools(ctx)
     // Never advertise the harness names without a confirmed harness surface:

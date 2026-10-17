@@ -17,12 +17,14 @@
 // catalog today serves free models the snapshot lacks (`deepseek-v4.1-flash-free`,
 // `nemotron-3.5-super-vl-free`) and the ledger already holds real free-lane rows
 // for one of them — so the row set is `freeModels()` UNION every model id the
-// ledger shows on the FREE lane, minus the dead models (`DEAD_MODELS`: the
-// gateway rejects those outright, so their stale rows must not read as
-// available). See `freeLaneIds` for the lane rule.
+// ledger shows on the FREE lane, minus the dead models (`deadModels()` in
+// src/dead-models.ts — the seed plus every retirement learned at runtime from
+// gateway deprecation failures; the gateway rejects those outright, so their
+// stale rows must not read as available). See `freeLaneIds` for the lane rule.
 
 import { readFileSync } from "node:fs"
-import { DEAD_MODELS, freeModels, OPENCODE_CATALOG } from "./models"
+import { deadModels } from "./dead-models"
+import { freeModels, OPENCODE_CATALOG } from "./models"
 import { trafficFile, type TrafficEntry } from "./traffic"
 
 /** Rolling windows, in ms. A row exactly on the boundary counts as inside. */
@@ -117,13 +119,16 @@ export function freeLaneIds(
   roster: Iterable<string> = freeModels().map((model) => model.id),
 ): string[] {
   paidIds ??= paidModelIds()
+  // One read per report, not per row: the shared dead set (seed + runtime
+  // learnings) is what keeps this report consistent with the provider roster.
+  const dead = deadModels()
   const ids = new Set(roster)
   for (const entry of entries) {
     if (!entry.model || !isFreeLanePath(entry.path)) continue
     if (paidIds.has(entry.model)) continue
     // Dead models are never available again, so a historical row would only
     // present them as an idle-but-usable row.
-    if (DEAD_MODELS.has(entry.model)) continue
+    if (dead.has(entry.model)) continue
     ids.add(entry.model)
   }
   return [...ids]

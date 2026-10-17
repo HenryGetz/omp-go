@@ -8,7 +8,8 @@
 //   bun test/gateway-sweep.ts
 
 import { readFileSync } from "node:fs"
-import { allFreeModels, DEAD_MODELS, usesResponsesAPI } from "../src/models"
+import { SEED_DEAD_MODELS } from "../src/dead-models"
+import { allFreeModels, usesResponsesAPI } from "../src/models"
 import { harnessFetch } from "../src/ordered-fetch"
 
 // A real agent-conversation body (the free tier's gate checks the payload is
@@ -41,10 +42,10 @@ for (const model of allFreeModels()) {
     }
     const protocol = responses ? "responses" : "completions"
     if (res.status === 200) {
-      console.log(`${DEAD_MODELS.has(model.id) ? "wake" : "ok  "} ${model.id} (${protocol})${DEAD_MODELS.has(model.id) ? " — RECOVERED, remove from DEAD_MODELS" : ""}`)
+      console.log(`${SEED_DEAD_MODELS.has(model.id) ? "wake" : "ok  "} ${model.id} (${protocol})${SEED_DEAD_MODELS.has(model.id) ? " — RECOVERED, remove from SEED_DEAD_MODELS" : ""}`)
       continue
     }
-    if (DEAD_MODELS.has(model.id)) {
+    if (SEED_DEAD_MODELS.has(model.id)) {
       upstream++
       console.log(`hid  ${model.id} (${protocol}) -> ${res.status} (known dead upstream, hidden from the picker)`)
       continue
