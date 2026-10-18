@@ -105,6 +105,59 @@ function stopTunnel(target: string): void {
   }
 }
 
+/**
+ * ssh argv for one host's dynamic tunnel.
+ *
+ * `ControlMaster=no` + `ControlPath=none` keep the tunnel on a connection of
+ * its own. Users commonly put `ControlMaster auto` / `ControlPersist` in
+ * ~/.ssh/config; a muxed `-D` forwards every SOCKS channel over that shared
+ * master. When the master wedges it keeps the local port listening but closes
+ * every channel — the tunnel then looks alive and poisons requests instead of
+ * failing over. A tunnel we own must never inherit that state.
+ */
+export function tunnelArgs(port: number, target: string): string[] {
+  return [
+    "-D",
+    `127.0.0.1:${port}`,
+    "-N",
+    "-o",
+    "ControlMaster=no",
+    "-o",
+    "ControlPath=none",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ExitOnForwardFailure=yes",
+    "-o",
+    "ServerAliveInterval=30",
+    "-o",
+    "ServerAliveCountMax=3",
+    target,
+  ]
+}
+
+/**
+ * One SOCKS5 method negotiation against `port`. The tunnel is ready only when
+ * the proxy actually speaks SOCKS: a wedged SSH master (or a stale listener
+ * from another process) still accepts TCP and then closes the channel, so a
+ * TCP-connect probe would mark it ready and poison the next request.
+ */
+export function socksProbe(port: number, timeoutMs = 1_000): Promise<boolean> {
+  return new Promise((done) => {
+    const socket = net.connect(port, "127.0.0.1")
+    const finish = (ok: boolean) => {
+      socket.destroy()
+      done(ok)
+    }
+    socket.setTimeout(timeoutMs, () => finish(false))
+    socket.once("error", () => finish(false))
+    socket.once("close", () => finish(false))
+    socket.once("connect", () => socket.write(Buffer.from([0x05, 0x01, 0x00])))
+    // Greeting reply: version 5 + a method we offered (0x00 no-auth; 0xff = none).
+    socket.once("data", (chunk) => finish(chunk.length >= 2 && chunk[0] === 0x05 && chunk[1] !== 0xff))
+  })
+}
+
 async function ensureTunnel(host: EgressHost): Promise<void> {
   const live = tunnels.get(host.target)
   if (live?.ready) return
@@ -114,20 +167,7 @@ async function ensureTunnel(host: EgressHost): Promise<void> {
     const port = await freePort()
     const child = spawn(
       "ssh",
-      [
-        "-D",
-        `127.0.0.1:${port}`,
-        "-N",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ExitOnForwardFailure=yes",
-        "-o",
-        "ServerAliveInterval=30",
-        "-o",
-        "ServerAliveCountMax=3",
-        host.target,
-      ],
+      tunnelArgs(port, host.target),
       // Detached: the tunnel is a daemon child — runtimes reap attached
       // children (bun does so aggressively), which killed tunnels mid-flight.
       { stdio: ["ignore", "ignore", "pipe"], detached: true },
@@ -144,22 +184,16 @@ async function ensureTunnel(host: EgressHost): Promise<void> {
     child.stderr?.on("data", (chunk) => {
       record.stderr = `${record.stderr}${chunk}`.slice(-2000)
     })
-    // Wait until the SOCKS port actually accepts connections (bounded): ssh
-    // takes a moment to establish, and connecting early fails the request over
-    // to direct egress.
-    // The PORT is the truth, not the process: ssh configs with
+    // Wait until the SOCKS proxy actually completes its handshake (bounded):
+    // ssh takes a moment to establish, and a listener that accepts TCP but
+    // never speaks SOCKS (wedged master, dead forward) must fail over to the
+    // next hop instead of being marked ready.
+    // The HANDSHAKE is the truth, not the process: ssh configs with
     // ForkAfterAuthentication make the spawned child exit 0 immediately while
     // the forwarded listener lives on.
     const deadline = Date.now() + 10_000
     for (;;) {
-      const ready = await new Promise<boolean>((done) => {
-        const probe = net.connect(port, "127.0.0.1")
-        probe.once("connect", () => {
-          probe.destroy()
-          done(true)
-        })
-        probe.once("error", () => done(false))
-      })
+      const ready = await socksProbe(port)
       if (ready) {
         record.ready = true
         return

@@ -61,6 +61,13 @@ request — it revives itself; `/egress off <host>` pauses one without deleting 
 buries it. Tab-completion offers your `~/.ssh/config` hosts, because typing
 hostnames is not a skill anyone should need to exercise here.
 
+Tunnels run as their own SSH connection (`ControlMaster=no`,
+`ControlPath=none`): `ControlMaster auto` in your `~/.ssh/config` would
+otherwise mux every SOCKS channel over one shared master, and a wedged master
+keeps the port listening while closing every channel. Readiness is a real
+SOCKS5 handshake rather than a TCP connect, so a tunnel that cannot carry
+traffic is dropped and the next hop is tried instead of costing a request.
+
 Prefer DIY? `OMP_GO_PROXIES="socks5://127.0.0.1:1081,http://10.0.0.2:8080"`
 pins an explicit pool (SOCKS5 or HTTP CONNECT — bare `ssh -D` tunnels work
 fine). Hosts live in `~/.omp/agent/omp-go-egress.json`.
@@ -338,6 +345,8 @@ shouts "wake" when a hidden model recovers upstream.
   translates into omp's.
 - `bun test/proxy.ts` pins the egress pool: proxy parsing, round-robin
   failover, and the SOCKS5 tunnel handshake.
+- `bun test/egress.ts` pins the tunnel spawn contract (`ControlMaster=no`,
+  `ControlPath=none`) and the SOCKS5-handshake readiness probe.
 - `bun test/free-usage.ts` pins the `/freeusage` accounting: window boundaries,
   the cooldown a 429 announces, the free-lane predicate that keeps Go-lane and
   paid rows out, tolerant ledger reads, and the model filter.
