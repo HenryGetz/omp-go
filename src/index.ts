@@ -140,7 +140,7 @@ export default function opencodeAuthExtension(pi: ExtensionAPI): void {
           break
         case "add": {
           const input = target || (await ctx.ui.input("SSH target to route free-tier traffic through", "user@host"))
-          if (!input?.trim()) return ctx.ui.notify("usage: /egress add <ssh-target> (e.g. student@100.125.193.75)", "warning")
+          if (!input?.trim()) return ctx.ui.notify("usage: /egress add <ssh-target> (e.g. student@192.0.2.10)", "warning")
           await addFlow(input.trim())
           break
         }

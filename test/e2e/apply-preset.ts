@@ -9,9 +9,15 @@
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
-import yaml from "/home/wavy/.omp/plugins/node_modules/yaml/dist/index.js"
-import { normalizePreset } from "/home/wavy/.omp/plugins/node_modules/ompreset/src/config.ts"
-import { updateAgentConfigFile } from "/home/wavy/.omp/plugins/node_modules/ompreset/src/applicator.ts"
+import { pathToFileURL } from "node:url"
+
+// Plugin location is runtime-selected (OMP_PLUGIN_DIR or the user's home), so these
+// specifiers cannot be static imports.
+const pluginDir = process.env.OMP_PLUGIN_DIR ?? path.join(homedir(), ".omp", "plugins")
+
+const { default: yaml } = await import(pathToFileURL(path.join(pluginDir, "node_modules/yaml/dist/index.js")).href)
+const { normalizePreset } = await import(pathToFileURL(path.join(pluginDir, "node_modules/ompreset/src/config.ts")).href)
+const { updateAgentConfigFile } = await import(pathToFileURL(path.join(pluginDir, "node_modules/ompreset/src/applicator.ts")).href)
 
 const name = process.argv[2] ?? "go"
 const presetsFile = path.join(homedir(), ".omp", "agent", "presets.yml")

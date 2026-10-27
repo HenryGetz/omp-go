@@ -9,12 +9,12 @@ import { socksProbe, tunnelArgs } from "../src/egress"
 
 // argv: a connection of its own, never the user's ControlMaster
 {
-  const args = tunnelArgs(43210, "student@100.125.193.75")
+  const args = tunnelArgs(43210, "student@192.0.2.10")
   assert.equal(args[0], "-D")
   assert.equal(args[1], "127.0.0.1:43210")
   assert.ok(args.includes("ControlMaster=no"), "tunnel must not multiplex over the user's master")
   assert.ok(args.includes("ControlPath=none"), "tunnel must not reuse a control socket")
-  assert.equal(args.at(-1), "student@100.125.193.75", "target stays last")
+  assert.equal(args.at(-1), "student@192.0.2.10", "target stays last")
   assert.ok(args.includes("ExitOnForwardFailure=yes"), "forward failure still aborts the tunnel")
   assert.ok(args.includes("ServerAliveCountMax=3"), "keepalive policy unchanged")
   for (const [index, value] of args.entries())

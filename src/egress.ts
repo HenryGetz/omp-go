@@ -2,7 +2,7 @@
 // on demand. Per-endpoint metering means each machine's public IP is its own
 // free-tier budget; a pool spreads one omp across all of them.
 //
-//   /egress add student@100.125.193.75     # record a host
+//   /egress add student@192.0.2.10     # record a host
 //   /egress                                # list + live tunnel status
 //
 // On the first request after a host is added (and on every omp start) a

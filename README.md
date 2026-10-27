@@ -42,10 +42,10 @@ very exploitable by anyone who owns more than one computer. If that's you:
 …and the plugin does the onboarding:
 
 1. No hosts yet? It **asks for an SSH target right there in the TUI**. Paste
-   `student@100.125.193.75`, hit enter, done.
+   `student@192.0.2.10`, hit enter, done.
 2. It **checks the host immediately** — opens the `ssh -D` tunnel (key auth,
    BatchMode; it's your machine, you already have the key), and reports the
-   egress IP it will use: `added student@100.125.193.75 — egress 198.174.0.110`.
+   egress IP it will use: `added student@192.0.2.10 — egress 198.51.100.20`.
 3. If the new box exits through the same IP as the one you're sitting at, it
    says so instead of pretending you gained a budget. If SSH fails, you get
    the actual error and the fix (`ssh-copy-id student@…`), not a shrug.

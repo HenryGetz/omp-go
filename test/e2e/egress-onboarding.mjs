@@ -10,7 +10,7 @@
 //    runs when TUI_MODE=1 and is diagnostic.
 //
 //   bun test/e2e/egress-onboarding.mjs
-//   EGRESS_ONBOARD_TARGET=student@100.125.193.75 bun test/e2e/egress-onboarding.mjs  # real-host success path
+//   EGRESS_ONBOARD_TARGET=student@192.0.2.10 bun test/e2e/egress-onboarding.mjs  # real-host success path
 //   TUI_MODE=1 E2E_DUMP=1 bun test/e2e/egress-onboarding.mjs
 
 import { execFileSync } from "node:child_process"

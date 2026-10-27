@@ -17,7 +17,7 @@ import { TuiTest } from "@microsoft/tui-test"
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..")
 const OMP = process.env.OMP_BIN ?? "omp"
-const TARGET = process.env.EGRESS_TUNNEL_TARGET ?? "student@100.125.193.75"
+const TARGET = process.env.EGRESS_TUNNEL_TARGET ?? "student@192.0.2.10"
 
 const home = mkdtempSync(path.join(tmpdir(), "omp-egress-free-"))
 const cwd = mkdtempSync(path.join(tmpdir(), "omp-egress-free-cwd-"))

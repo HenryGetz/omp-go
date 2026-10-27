@@ -8,7 +8,7 @@
 //    and stay on a tunnel hop (failover, no direct leak).
 //
 //   node test/e2e/egress-pool.mjs
-//   EGRESS_POOL_TARGETS="student@100.125.193.75,wrcadmin@100.93.105.17" node test/e2e/egress-pool.mjs
+//   EGRESS_POOL_TARGETS="student@192.0.2.10,wrcadmin@100.93.105.17" node test/e2e/egress-pool.mjs
 
 import { execFileSync, spawnSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs"
@@ -19,7 +19,7 @@ import { TuiTest } from "@microsoft/tui-test"
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..")
 const OMP = process.env.OMP_BIN ?? "omp"
-const TARGETS = (process.env.EGRESS_POOL_TARGETS ?? "student@100.125.193.75,wrcadmin@100.93.105.17")
+const TARGETS = (process.env.EGRESS_POOL_TARGETS ?? "student@192.0.2.10,wrcadmin@100.93.105.17")
   .split(",")
   .map((target) => target.trim())
   .filter(Boolean)
